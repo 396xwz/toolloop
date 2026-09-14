@@ -1,4 +1,5 @@
 BIN := toolloop
+WINDOWS_BIN ?= toolloop.exe
 CMD := ./cmd/toolloop
 GO ?= go
 PYTHON ?= python3
@@ -7,12 +8,13 @@ INDEX_PATH ?= .
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build run repl ollama test vet fmt tidy check-services setup-python index clean
+.PHONY: help build build-windows run repl ollama test vet fmt tidy check-services setup-python index clean
 
 help:
 	@printf '%s\n' \
 		'Toolloop targets:' \
 		'  make build                 Build ./toolloop' \
+		'  make build-windows         Cross-build a Windows amd64 binary' \
 		'  make run                   Run the default llama.cpp backend' \
 		'  make repl                  Start the default llama.cpp REPL' \
 		'  make ollama                Start an Ollama REPL (MODEL=qwen2.5:14b)' \
@@ -27,6 +29,9 @@ help:
 
 build:
 	$(GO) build -o $(BIN) $(CMD)
+
+build-windows:
+	GOOS=windows GOARCH=amd64 $(GO) build -o $(WINDOWS_BIN) $(CMD)
 
 run:
 	$(GO) run $(CMD)
@@ -61,4 +66,4 @@ index:
 	$(GO) run $(CMD) -index "$(INDEX_PATH)"
 
 clean:
-	rm -f $(BIN) coverage.out agent_memory.db agent_memory.db-shm agent_memory.db-wal agent_rag.db agent_rag.db-shm agent_rag.db-wal
+	rm -f $(BIN) $(WINDOWS_BIN) coverage.out agent_memory.db agent_memory.db-shm agent_memory.db-wal agent_rag.db agent_rag.db-shm agent_rag.db-wal

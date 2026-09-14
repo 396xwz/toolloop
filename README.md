@@ -71,6 +71,9 @@ docs/                architecture notes
 ## Requirements
 
 - Go 1.26.x (the module currently declares `go 1.26.5`).
+- Git 2.30+ for the `/git <revision>` REPL command. This version supports the
+  safe `rev-parse --end-of-options` delimiter used for revision arguments that
+  begin with `-`.
 - Default backend: a llama.cpp server running at `http://localhost:8080`
   (override with `-server`) and serving `/completion`.
 - Optional Ollama backend: [Ollama](https://ollama.com) running locally; enable
@@ -246,6 +249,29 @@ go run ./cmd/toolloop -repl
 main> fs read README.md
 main> python python/wnba.py
 main> Use browser on https://go.dev and summarize the landing page
+```
+
+### Inspecting Git state from the REPL
+
+`/git` is a native, **read-only** REPL command. It prints the repository root,
+branch (or detached HEAD), status, and separate staged and unstaged diffs.
+`/git <revision>` resolves one revision and shows its metadata and patch. Git
+output is bounded; large sections end with `...[truncated]`. Git commands time
+out after 10 seconds, disable configured fsmonitor support, and diffs disable
+text-conversion drivers. On Unix, cancellation kills Git's process group. On
+Windows, it directly kills Git and closes its Job Object, which terminates
+descendants already assigned to that Job Object. It first runs
+`taskkill /T /F` for the direct Git PID to best-effort target descendants
+created before Job Object assignment; such a descendant may survive if
+`taskkill` is unavailable or times out. On other platforms, cancellation kills
+the direct Git process and closes its output reader so it still returns on
+deadline, but a Git descendant that inherited the output handle may continue
+running.
+
+```text
+main> /git
+main> /git HEAD
+main> /git v1.2.3
 ```
 
 Filesystem read/write:

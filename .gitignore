@@ -1,4 +1,5 @@
 /toolloop
+/toolloop.exe
 .venv/
 *.db
 *.db-shm
