@@ -1,0 +1,8 @@
+/toolloop
+.venv/
+*.db
+*.db-shm
+*.db-wal
+coverage.out
+sports.md
+dk.md

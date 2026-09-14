@@ -32,10 +32,10 @@ run:
 	$(GO) run $(CMD)
 
 repl:
-	$(GO) run $(CMD) -repl -skip-index
+	$(GO) run $(CMD) -repl
 
 ollama:
-	$(GO) run $(CMD) -backend ollama -model $(MODEL) -repl -skip-index
+	$(GO) run $(CMD) -backend ollama -model $(MODEL) -repl
 
 test:
 	$(GO) test ./...

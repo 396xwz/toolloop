@@ -3,6 +3,29 @@
 A local Go agent with one CLI and pluggable model backends. The default backend
 is llama.cpp; Ollama remains available with `-backend ollama`.
 
+## Quick start: easiest Ollama path
+
+If you want the fastest first run, use Ollama before setting up a llama.cpp
+server on `localhost:8080`. Make sure Ollama is running locally and the model
+you name is already available.
+
+```bash
+go run ./cmd/toolloop -backend ollama -model qwen2.5:14b \
+  -task "Summarize what this project does"
+
+go run ./cmd/toolloop -backend ollama -model qwen2.5:14b -repl
+```
+
+The default backend is still llama.cpp when `-backend` is omitted. If a
+`./documents` directory exists, toolloop indexes it automatically on startup;
+use `-skip-index` to disable that optional pass.
+
+Example llama.cpp server usage:
+
+```bash
+go run ./cmd/toolloop -repl -server http://localhost:8080
+```
+
 | Command | Backend | Notes |
 |---------|---------|-------|
 | `go run ./cmd/toolloop` | llama.cpp `/completion` | Default. Uses prompt-based JSON tool calls and `/apply-template` when available. |
@@ -22,8 +45,8 @@ have been removed.
   project's own `.venv` interpreter, so scripts in `python/` get their
   installed dependencies instead of a bare system Python.
 - Durable memory in `agent_memory.db` and durable RAG in `agent_rag.db`.
-- Directory indexing with `-index`; skip the default index pass with
-  `-skip-index`.
+- Directory indexing with `-index`; if `./documents` exists it is indexed
+  automatically on startup unless you pass `-skip-index`.
 - Multi-task CLI with repeatable `-task` and shared context between tasks.
 - REPL mode with direct tools and named sub-agents loaded from `AGENTS.md`.
 - Prompt override with `-prompt <file>`.
@@ -58,12 +81,6 @@ docs/                architecture notes
   above the working directory or the compiled binary) with `.venv/bin/python3`;
   falls back to `python3`/`python` on `PATH`, or set `PYTHON_BIN` to an exact
   interpreter path.
-
-Example llama.cpp server usage:
-
-```bash
-go run ./cmd/toolloop -repl -skip-index -server http://localhost:8080
-```
 
 ## Architecture
 
@@ -161,7 +178,7 @@ directory or the compiled binary → `python3`/`python` on `PATH`.
 | `-server` | llama.cpp server base URL (default `http://localhost:8080`) |
 | `-model` | Model name/label; with llama.cpp this is informational because the server serves one loaded model |
 | `-index` | Index a directory into RAG |
-| `-skip-index` | Skip automatic indexing of `Shared-Claude-Chats` |
+| `-skip-index` | Skip automatic indexing of `./documents` when it exists |
 | `-web` | Pre-run web search and inject result as context |
 | `-browser` | Pre-run URL fetch and inject result as context |
 | `-scrape` | Pre-run Scrapling scrape and inject capped result as context |
@@ -192,7 +209,7 @@ Build and run the CLI:
 ```bash
 cd toolloop
 go build -o toolloop ./cmd/toolloop
-./toolloop -repl -skip-index
+./toolloop -repl
 ```
 
 Or run it directly with Ollama:
@@ -210,21 +227,21 @@ go run ./cmd/toolloop -task "Summarize what this project does"
 Run the default llama.cpp backend:
 
 ```bash
-go run ./cmd/toolloop -skip-index -server http://localhost:8080 \
+go run ./cmd/toolloop -server http://localhost:8080 \
   -task "Use fs read on README.md and summarize the project"
 ```
 
 Run the Ollama backend:
 
 ```bash
-go run ./cmd/toolloop -backend ollama -model qwen2.5:14b -skip-index \
+go run ./cmd/toolloop -backend ollama -model qwen2.5:14b \
   -task "Use fs read on README.md and summarize the project"
 ```
 
 REPL:
 
 ```bash
-go run ./cmd/toolloop -repl -skip-index
+go run ./cmd/toolloop -repl
 
 main> fs read README.md
 main> python python/wnba.py
@@ -234,24 +251,24 @@ main> Use browser on https://go.dev and summarize the landing page
 Filesystem read/write:
 
 ```bash
-go run ./cmd/toolloop -skip-index \
+go run ./cmd/toolloop \
   -task "Use fs read_many to read README.md AGENTS.md and summarize each file"
 
-go run . -skip-index \
+go run ./cmd/toolloop \
   -task "Use the fs tool with op=write, path=sample.go, and content set to a complete runnable Go program. After writing, stop."
 ```
 
 Safe edit by unique snippet:
 
 ```bash
-go run ./cmd/toolloop -skip-index \
+go run ./cmd/toolloop \
   -task 'Use fs op=edit on sample.go with old_snippet set to `fmt.Println("old")` and new_snippet set to `fmt.Println("new")`. Return the diff hunk.'
 ```
 
 Scrape a dynamic page with Scrapling:
 
 ```bash
-go run ./cmd/toolloop -skip-index \
+go run ./cmd/toolloop \
   -scrape "https://sportsbook.draftkings.com/leagues/football/ncaaf" \
   -scrape-output dk.md \
   -task "Summarize only the live College Football games from the scrape result"
@@ -260,7 +277,7 @@ go run ./cmd/toolloop -skip-index \
 Run a Python script from the model:
 
 ```bash
-go run ./cmd/toolloop -skip-index \
+go run ./cmd/toolloop \
   -task "Use the python tool to run python/wnba.py and summarize the output"
 ```
 
@@ -268,7 +285,7 @@ Multi-task run with output:
 
 ```bash
 go run ./cmd/toolloop \
-  -task "Use fs tree with depth 2 on Shared-Claude-Chats" \
+  -task "Use fs tree with depth 2 on cmd/toolloop" \
   -task "Use fs read on README.md and summarize the project" \
   -output project-summary.txt
 ```
@@ -361,7 +378,7 @@ Using built-in "builder" role prompt.
 Orchestrator / builder workflow:
 
 ```
-go run ./cmd/toolloop -repl -skip-index
+go run ./cmd/toolloop -repl
 
 main>         /agent use orchestrator
 orchestrator> Plan how to add retry logic to the scrape tool

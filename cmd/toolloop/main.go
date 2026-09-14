@@ -26,7 +26,7 @@ const (
 	memoryDBPath     = "agent_memory.db"
 	ragDBPath        = "agent_rag.db"
 	Timeout          = 240
-	defaultIndexRoot = "Shared-Claude-Chats"
+	defaultIndexRoot = "documents"
 
 	maxStepResultChars         = 4000
 	maxFinalAnswerHistoryChars = 24000
@@ -1611,7 +1611,7 @@ func main() {
 	shellCmd := flag.String("shell", "", "Shell command")
 	outputFile := flag.String("output", "", "Save full output to a file")
 	indexPath := flag.String("index", "", "Index a directory into RAG")
-	skipIndex := flag.Bool("skip-index", false, "Skip automatic indexing of Shared-Claude-Chats")
+	skipIndex := flag.Bool("skip-index", false, "Skip automatic indexing of ./documents when it exists")
 	modelName := flag.String("model", defaultModel, "Model name/label; llama.cpp serves one loaded model")
 	replMode := flag.Bool("repl", false, "Interactive REPL mode")
 	// prompt file option to override default system prompt
@@ -1623,11 +1623,15 @@ func main() {
 	hasDirectAction := *webQuery != "" || *browserAction != "" || *scrapeURL != "" || *fsOp != "" || *shellCmd != ""
 	if len(tasks) == 0 && *indexPath == "" && !*replMode && !hasDirectAction {
 		log.Fatal(`Usage:
-  go run . -repl
-  go run . -task "..."
-  go run . -index Shared-Claude-Chats
-  go run . -backend ollama -model qwen2.5:14b -task "..."
-  go run . -scrape "https://example.com" -scrape-output sports.md
+  go run ./cmd/toolloop -repl
+  go run ./cmd/toolloop -task "..."
+  go run ./cmd/toolloop -index documents
+  go run ./cmd/toolloop -backend ollama -model qwen2.5:14b -task "..."
+  go run ./cmd/toolloop -scrape "https://example.com" -scrape-output sports.md
+
+Notes:
+  If ./documents exists, it is indexed automatically on startup.
+  Use -skip-index to disable that optional pass.
 
 Options:
   -backend llama.cpp|ollama
