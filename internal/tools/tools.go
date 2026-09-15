@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -287,20 +288,26 @@ func findScraplingBinary() (string, error) {
 		return p, nil
 	}
 
+	// Windows venvs install console scripts under Scripts\ with a .exe
+	// suffix; Unix venvs use bin/ with no extension.
+	rel := filepath.Join("bin", "scrapling")
+	if runtime.GOOS == "windows" {
+		rel = filepath.Join("Scripts", "scrapling.exe")
+	}
 	var candidates []string
 	if wd, err := os.Getwd(); err == nil {
 		candidates = append(candidates,
-			filepath.Join(wd, ".venv", "bin", "scrapling"),
-			filepath.Join(wd, "..", ".venv", "bin", "scrapling"),
-			filepath.Join(wd, "..", "..", ".venv", "bin", "scrapling"),
+			filepath.Join(wd, ".venv", rel),
+			filepath.Join(wd, "..", ".venv", rel),
+			filepath.Join(wd, "..", "..", ".venv", rel),
 		)
 	}
-	if exe, err := os.Executable(); err == nil {
-		dir := filepath.Dir(exe)
+	if exePath, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exePath)
 		candidates = append(candidates,
-			filepath.Join(dir, ".venv", "bin", "scrapling"),
-			filepath.Join(dir, "..", ".venv", "bin", "scrapling"),
-			filepath.Join(dir, "..", "..", ".venv", "bin", "scrapling"),
+			filepath.Join(dir, ".venv", rel),
+			filepath.Join(dir, "..", ".venv", rel),
+			filepath.Join(dir, "..", "..", ".venv", rel),
 		)
 	}
 	for _, p := range candidates {
@@ -308,7 +315,7 @@ func findScraplingBinary() (string, error) {
 			return p, nil
 		}
 	}
-	return "", fmt.Errorf("scrapling CLI not found; install it or set SCRAPLING_BIN")
+	return "", fmt.Errorf("scrapling CLI not found; install it or set SCRAPLING_BIN (checked %s)", strings.Join(candidates, ", "))
 }
 
 func firstNonEmpty(values ...string) string {

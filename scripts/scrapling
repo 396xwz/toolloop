@@ -1,0 +1,6 @@
+#!/bin/sh
+# Unix shim exposing scripts/scrape.mjs as the "scrapling" CLI contract
+# (see scripts/scrape.mjs). Point SCRAPLING_BIN at this file, or add
+# scripts/ to PATH. Requires Node 18+; fetch modes need
+# npm install && npx playwright install chromium.
+exec node "$(dirname "$0")/scrape.mjs" "$@"

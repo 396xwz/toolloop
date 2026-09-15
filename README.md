@@ -75,14 +75,35 @@ docs/                architecture notes
   (override with `-server`) and serving `/completion`.
 - Optional Ollama backend: [Ollama](https://ollama.com) running locally; enable
   it with `-backend ollama`.
-- Optional for `scrape`: the Python Scrapling CLI on `PATH`, at
-  `.venv/bin/scrapling`, or specified with `SCRAPLING_BIN`.
+- Optional for `scrape`: a Scrapling CLI on `PATH`, at `.venv/bin/scrapling`,
+  or specified with `SCRAPLING_BIN` (see "Scrape backends" below).
 - Optional for `python`: a `.venv` at the repo root (or one/two directories
   above the working directory or the compiled binary) with `.venv/bin/python3`;
   falls back to `python3`/`python` on `PATH`, or set `PYTHON_BIN` to an exact
   interpreter path.
 - Shell tool: Bash is required on Unix. On Windows, the shell tool uses Windows
   PowerShell with `-NoProfile` and `-NonInteractive`.
+
+### Scrape backends
+
+The `scrape` tool shells out to a CLI that implements the Scrapling contract
+(`extract <get|fetch|stealthy-fetch> <url> <output> ...`). Two backends are
+supported:
+
+- **Node (recommended, works on Windows without Python)**:
+  `make setup-node` installs Playwright + Chromium, then point
+  `SCRAPLING_BIN` at `scripts/scrapling.bat` (Windows) or `scripts/scrapling`
+  (Unix), or add `scripts/` to `PATH`.
+- **Python**: install the Scrapling CLI and use the usual resolution
+  (`PATH`, `.venv/bin/scrapling`, or `SCRAPLING_BIN`).
+
+```powershell
+# Windows
+.\scripts\scrapling.bat extract stealthy-fetch https://example.com out.md --timeout 60000 --wait 3000 --network-idle --block-ads --ai-targeted
+
+# Unix
+./scripts/scrapling extract fetch https://example.com out.md --timeout 60000
+```
 
 ## Architecture
 

@@ -36,6 +36,7 @@ type LlamaChatResponse struct {
 	Message LlamaMessage
 	Done    bool
 	Raw     string
+	Stopped bool // true when the server stopped because of the token budget (no stop token)
 }
 
 type LlamaClient struct {
@@ -143,9 +144,21 @@ type completionResponse struct {
 }
 
 func (c *LlamaClient) Complete(ctx context.Context, prompt string, temperature float64) (string, error) {
+	content, _, err := c.CompleteN(ctx, prompt, temperature, c.NPredict)
+	return content, err
+}
+
+// CompleteN runs a completion with an explicit token budget. It returns the
+// content and whether the server stopped because of the budget: llama.cpp
+// reports stop=false when n_predict is hit (no stop token was produced),
+// which means the output was truncated mid-thought.
+func (c *LlamaClient) CompleteN(ctx context.Context, prompt string, temperature float64, nPredict int) (string, bool, error) {
+	if nPredict <= 0 {
+		nPredict = c.NPredict
+	}
 	req := completionRequest{
 		Prompt:      prompt,
-		NPredict:    c.NPredict,
+		NPredict:    nPredict,
 		Temperature: temperature,
 		Stream:      false,
 		CachePrompt: true,
@@ -154,18 +167,27 @@ func (c *LlamaClient) Complete(ctx context.Context, prompt string, temperature f
 	var out completionResponse
 	debugf("DEBUG: POST %s prompt_len=%d n_predict=%d\n", c.url("/completion"), len(prompt), req.NPredict)
 	if err := c.postJSON(ctx, "/completion", req, &out); err != nil {
-		return "", err
+		return "", false, err
+	}
+	if strings.TrimSpace(out.Content) == "" {
+		return "", false, fmt.Errorf("llama.cpp returned an empty completion")
 	}
 	debugf("DEBUG: completion content_len=%d stop=%v\n", len(out.Content), out.Stop)
-	return out.Content, nil
+	return out.Content, out.Stop, nil
 }
 
 func (c *LlamaClient) Chat(ctx context.Context, messages []LlamaMessage, temperature float64, fn func(LlamaChatResponse) error) error {
+	return c.ChatBudget(ctx, messages, temperature, c.NPredict, fn)
+}
+
+// ChatBudget is Chat with an explicit token budget. Chat uses the client's
+// NPredict; callers may provide a different budget for this request.
+func (c *LlamaClient) ChatBudget(ctx context.Context, messages []LlamaMessage, temperature float64, nPredict int, fn func(LlamaChatResponse) error) error {
 	prompt, ok := c.applyTemplate(ctx, messages)
 	if !ok {
 		prompt = fallbackPrompt(messages)
 	}
-	content, err := c.Complete(ctx, prompt, temperature)
+	content, stopped, err := c.CompleteN(ctx, prompt, temperature, nPredict)
 	if err != nil {
 		return err
 	}
@@ -174,7 +196,7 @@ func (c *LlamaClient) Chat(ctx context.Context, messages []LlamaMessage, tempera
 	if fn == nil {
 		return nil
 	}
-	return fn(LlamaChatResponse{Message: msg, Done: true, Raw: content})
+	return fn(LlamaChatResponse{Message: msg, Done: true, Stopped: stopped, Raw: content})
 }
 
 type LlamaEmbedder struct {

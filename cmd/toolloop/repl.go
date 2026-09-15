@@ -50,6 +50,9 @@ func isWeakREPLInput(s string) bool {
 
 func tryDirectToolLine(ctx context.Context, line string, registry tools.ToolRegistry) bool {
 	fields := strings.Fields(line)
+	for i := range fields {
+		fields[i] = stripQuotes(fields[i])
+	}
 	if len(fields) == 0 {
 		return false
 	}
@@ -169,6 +172,17 @@ func tryDirectToolLine(ctx context.Context, line string, registry tools.ToolRegi
 		return true
 	}
 	return false
+}
+
+// stripQuotes removes one pair of matching surrounding quotes from a token so
+// shell-style quoting (scrape "https://..." out.md) works in the REPL.
+func stripQuotes(s string) string {
+	if len(s) >= 2 {
+		if (s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'') {
+			return s[1 : len(s)-1]
+		}
+	}
+	return s
 }
 
 func runREPL(ctx context.Context, model engine.ChatModel, registry tools.ToolRegistry, mem memory.Memory, rag memory.RAG) {

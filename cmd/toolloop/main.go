@@ -343,18 +343,18 @@ Options:
 			fmt.Println("Browser:", truncate(res, 400))
 			initialContext.WriteString("Browser result:\n" + res + "\n\n")
 		}
-		if *scrapeURL != "" {
-			tool, _ := registry.Get("scrape")
-			res, err := tool.Execute(ctx, map[string]string{"url": *scrapeURL, "output": *scrapeOutput})
-			if err != nil {
-				fmt.Println("Scrape error:", err)
-				if res != "" {
-					fmt.Println(truncate(res, 4000))
-				}
-			} else {
-				fmt.Println("Scrape:", truncate(res, 4000))
-				initialContext.WriteString("Scrape result:\n" + res + "\n\n")
+	}
+	if *scrapeURL != "" {
+		tool, _ := registry.Get("scrape")
+		res, err := tool.Execute(ctx, map[string]string{"url": *scrapeURL, "output": *scrapeOutput})
+		if err != nil {
+			fmt.Println("Scrape error:", err)
+			if res != "" {
+				fmt.Println(truncate(res, 4000))
 			}
+		} else {
+			fmt.Println("Scrape:", truncate(res, 4000))
+			initialContext.WriteString("Scrape result:\n" + res + "\n\n")
 		}
 	}
 	if *fsOp != "" {

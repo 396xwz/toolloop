@@ -1,0 +1,13 @@
+{
+  "name": "toolloop",
+  "private": true,
+  "type": "module",
+  "description": "Node helpers for toolloop: Playwright-backed implementation of the scrapling scrape CLI",
+  "scripts": {
+    "scrape": "node scripts/scrape.mjs",
+    "setup": "npm install && npx playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "^1.63.0"
+  }
+}

@@ -1,6 +1,8 @@
 /toolloop
 /toolloop.exe
 .venv/
+node_modules/
+package-lock.json
 *.db
 *.db-shm
 *.db-wal

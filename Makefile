@@ -8,7 +8,7 @@ INDEX_PATH ?= .
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build build-windows run repl ollama test vet fmt tidy check-services setup-python index clean
+.PHONY: help build build-windows run repl ollama test vet fmt tidy check-services setup-python setup-node index clean
 
 help:
 	@printf '%s\n' \
@@ -24,7 +24,8 @@ help:
 		'  make fmt                   Format Go source files' \
 		'  make tidy                  Tidy Go module dependencies' \
 		'  make check-services        Check llama.cpp and Ollama endpoints' \
-		'  make setup-python          Create .venv and install requirements' \
+	' make setup-python Create .venv and install requirements' \
+	' make setup-node Install Node/Playwright scrape backend' \
 		'  make index INDEX_PATH=dir  Index a directory into RAG' \
 		'  make clean                 Remove generated local artifacts'
 
@@ -63,6 +64,11 @@ setup-python:
 	$(PYTHON) -m venv .venv
 	./.venv/bin/python -m pip install --upgrade pip
 	./.venv/bin/python -m pip install -r python/requirements.txt
+
+setup-node:
+	node --version
+	npm install
+	npx playwright install chromium
 
 index:
 	$(GO) run $(CMD) -index "$(INDEX_PATH)"
