@@ -105,7 +105,7 @@ func (w WebSearchTool) Execute(ctx context.Context, args map[string]string) (str
 
 	if len(results) == 0 {
 		// Fallback message
-		return fmt.Sprintf("No good results found for '%s'. Try using the browser tool on https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/", query), nil
+		return fmt.Sprintf("No good results found for '%s'. Try using the browser tool on '%s' ", query, query), nil
 	}
 
 	// Return top results

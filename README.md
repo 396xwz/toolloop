@@ -291,6 +291,16 @@ go run ./cmd/toolloop \
   -task 'Use fs op=edit on sample.go with old_snippet set to `fmt.Println("old")` and new_snippet set to `fmt.Println("new")`. Return the diff hunk.'
 ```
 
+Clone a repository through the shell tool:
+
+```bash
+go run ./cmd/toolloop \
+  -task "Use the shell tool to run: scripts/clone-repo.sh https://github.com/octocat/Hello-World.git"
+```
+
+`scripts/clone-repo.sh` clones into `/tmp/<directory-name>` and refuses to
+reuse an existing target there.
+
 Scrape a dynamic page with Scrapling:
 
 ```bash
