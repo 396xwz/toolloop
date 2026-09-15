@@ -10,7 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/396xwz/toolloop/internal/agent"
+	"github.com/396xwz/toolloop/internal/engine"
+	"github.com/396xwz/toolloop/internal/memory"
 )
 
 const defaultLlamaURL = "http://localhost:8080"
@@ -368,7 +369,7 @@ func (m *LlamaCppModel) SystemPromptValue() string { return m.SystemPrompt }
 
 func (m *LlamaCppModel) SetSystemPrompt(prompt string) { m.SystemPrompt = prompt }
 
-func (m *LlamaCppModel) PlanNextStep(ctx context.Context, task *agent.Task) (*agent.Step, error) {
+func (m *LlamaCppModel) PlanNextStep(ctx context.Context, task *engine.Task) (*engine.Step, error) {
 	history := ""
 	for _, s := range task.Steps {
 		toolInfo := "none"
@@ -450,7 +451,7 @@ Call a tool if needed. Otherwise respond with a short note that no tool is requi
 		last = toolful[len(toolful)-1]
 	}
 
-	step := &agent.Step{
+	step := &engine.Step{
 		Index: len(task.Steps),
 		Plan:  strings.TrimSpace(last.Message.Content),
 	}
@@ -484,14 +485,14 @@ Call a tool if needed. Otherwise respond with a short note that no tool is requi
 		}
 	}
 
-	step.ToolCall = &agent.ToolCall{Name: name, Args: args}
+	step.ToolCall = &engine.ToolCall{Name: name, Args: args}
 	if step.Plan == "" || strings.HasPrefix(strings.TrimSpace(step.Plan), "{") {
 		step.Plan = fmt.Sprintf("call %s %v", name, args)
 	}
 	return step, nil
 }
 
-func (m *LlamaCppModel) GenerateFinalAnswer(ctx context.Context, task *agent.Task) (string, error) {
+func (m *LlamaCppModel) GenerateFinalAnswer(ctx context.Context, task *engine.Task) (string, error) {
 	history := ""
 	usedTools := false
 	for _, s := range task.Steps {
@@ -573,6 +574,6 @@ Do NOT invent local files or directories.`, task.Description)
 	return answer, nil
 }
 
-var _ ChatModel = (*LlamaCppModel)(nil)
-var _ agent.Model = (*LlamaCppModel)(nil)
-var _ agent.Embedder = (*LlamaEmbedder)(nil)
+var _ engine.ChatModel = (*LlamaCppModel)(nil)
+var _ engine.Model = (*LlamaCppModel)(nil)
+var _ memory.Embedder = (*LlamaEmbedder)(nil)

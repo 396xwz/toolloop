@@ -9,7 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/396xwz/toolloop/internal/agent"
+	"github.com/396xwz/toolloop/internal/engine"
+	"github.com/396xwz/toolloop/internal/memory"
+	"github.com/396xwz/toolloop/internal/tools"
 )
 
 // ─── REPL AGENTS ────────────────────────────────────────────────────
@@ -405,10 +407,10 @@ func (a *replAgent) appendNotes(question, answer string) {
 // conversation notes, leaving the model's own prompt untouched afterwards.
 func runAgentTask(
 	ctx context.Context,
-	model ChatModel,
-	registry agent.ToolRegistry,
-	mem agent.Memory,
-	rag agent.RAG,
+	model engine.ChatModel,
+	registry tools.ToolRegistry,
+	mem memory.Memory,
+	rag memory.RAG,
 	ag *replAgent,
 	input string,
 ) (string, error) {
@@ -421,19 +423,19 @@ func runAgentTask(
 		desc = fmt.Sprintf("%s\n\nSession notes:\n%s", input, ag.Notes.String())
 	}
 
-	task := &agent.Task{
+	task := &engine.Task{
 		ID:          fmt.Sprintf("repl-%s-%d", ag.Name, time.Now().UnixNano()),
 		Description: desc,
 		CreatedAt:   time.Now(),
-		Status:      agent.TaskPending,
-		Steps:       []*agent.Step{},
+		Status:      engine.TaskPending,
+		Steps:       []*engine.Step{},
 		Memory:      mem,
 		RAG:         rag,
 		Tools:       registry,
 	}
 
-	engine := &agent.Engine{Model: model}
-	if err := engine.RunTask(ctx, task); err != nil {
+	taskEngine := &engine.Engine{Model: model}
+	if err := taskEngine.RunTask(ctx, task); err != nil {
 		return "", err
 	}
 	answer, err := model.GenerateFinalAnswer(ctx, task)
@@ -522,10 +524,10 @@ func handleAgentCommand(
 	line string,
 	mgr *agentManager,
 	in *bufio.Scanner,
-	model ChatModel,
-	registry agent.ToolRegistry,
-	mem agent.Memory,
-	rag agent.RAG,
+	model engine.ChatModel,
+	registry tools.ToolRegistry,
+	mem memory.Memory,
+	rag memory.RAG,
 ) {
 	fields := strings.Fields(line)
 	sub := "list"

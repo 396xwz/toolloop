@@ -32,7 +32,7 @@ go run ./cmd/toolloop -repl -server http://localhost:8080
 | `go run ./cmd/toolloop -backend ollama` | Ollama `/api/chat` | Uses Ollama native tool calls plus JSON fallback. |
 
 The CLI entry point lives in `cmd/toolloop`. The execution loop, tools,
-memory, RAG, and REPL agent compatibility layer live under `internal/`.
+memory, and RAG live under `internal/`.
 There is one active implementation; the former `src/` and `llama-go/` trees
 have been removed.
 
@@ -55,13 +55,10 @@ have been removed.
 ## Repository layout
 
 ```text
-cmd/toolloop/        CLI entry point and backend wiring
-internal/engine/     task execution loop and step guards
-internal/model/      model contracts
+cmd/toolloop/        CLI wiring, model backends, REPL, Git, and task helpers
+internal/engine/     task execution loop, step guards, and model contracts
 internal/tools/      filesystem, shell, browser, search, Python, and scrape tools
 internal/memory/     SQLite memory and RAG
-internal/agent/      application-facing type aliases
-internal/prompt/     reserved for shared prompt helpers
 python/              scripts executed by the Python tool
 examples/prompts/    reusable role prompt examples
 testdata/            test fixtures

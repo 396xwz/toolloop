@@ -52,6 +52,16 @@ type Model interface {
 	PlanNextStep(ctx context.Context, task *Task) (*Step, error)
 }
 
+// ChatModel adds final-answer generation and runtime prompt/model selection.
+type ChatModel interface {
+	Model
+	GenerateFinalAnswer(context.Context, *Task) (string, error)
+	ModelName() string
+	SetModel(string)
+	SystemPromptValue() string
+	SetSystemPrompt(string)
+}
+
 type Engine struct {
 	Model Model
 }
