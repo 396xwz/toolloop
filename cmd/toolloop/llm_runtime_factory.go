@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"time"
 
@@ -155,7 +156,7 @@ func buildOllamaTools() api.Tools {
 	shellProps := api.NewToolPropertiesMap()
 	shellProps.Set("cmd", api.ToolProperty{
 		Type:        api.PropertyType{"string"},
-		Description: "Shell command to execute",
+		Description: shellToolDescription(runtime.GOOS),
 	})
 
 	browserProps := api.NewToolPropertiesMap()
@@ -343,15 +344,11 @@ func (m *OllamaModel) PlanNextStep(ctx context.Context, task *engine.Task) (*eng
 		}
 	}
 
-	system := `You are a local tool-using agent.
-Use tools when needed to complete the task.
-Prefer the exact path and operation mentioned in the task.
-For directories use fs op=list or op=tree.
-For files use fs op=read or op=read_many.
-	For Python scripts or Python code, use the python tool. Example: python path=python/wnba2.py.
-	The python tool can run scripts under the repo's python/ directory using the project's .venv interpreter.
-	When calling fs, always set op and path as plain strings (e.g. op=read, path=README.md).
-	If you already have enough information from previous steps or retrieved context, do not call any tool.`
+	system := m.SystemPrompt
+	if strings.TrimSpace(system) == "" {
+		system = defaultSystemPrompt
+	}
+	system = system + "\n\n" + toolInstructions + "\n\n" + hostPlatformInstructions(runtime.GOOS)
 
 	user := fmt.Sprintf(`Task:
 %s
@@ -527,9 +524,15 @@ Do NOT invent local files or directories.`, task.Description)
 
 	modelName := m.ModelName()
 	stream := false
+	system := m.SystemPrompt
+	if strings.TrimSpace(system) == "" {
+		system = defaultSystemPrompt
+	}
+	system = system + "\n\n" + hostPlatformInstructions(runtime.GOOS)
 	req := &api.ChatRequest{
 		Model: modelName,
 		Messages: []api.Message{
+			{Role: "system", Content: system},
 			{Role: "user", Content: prompt},
 		},
 		Stream: &stream,

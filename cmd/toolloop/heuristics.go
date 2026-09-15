@@ -399,6 +399,20 @@ Rules:
 - To run a Python script or code, use the python tool, not shell.
 - If no tool is needed, reply with a short plain-text note instead (no JSON).`
 
+func hostPlatformInstructions(goos string) string {
+	if goos == "windows" {
+		return `Host OS is windows (GOOS=windows). The shell is PowerShell-compatible, not Bash. Do not use ls, which, cat, rm, grep, &&, 2>/dev/null, /dev/null, or uname. Prefer fs for list/read/info/tree. For shell, use PowerShell forms such as Get-Item .\file.jar, Get-Command python, and python -c "..."; prefer Windows paths such as .\name.jar.`
+	}
+	return fmt.Sprintf("Host OS is %s (GOOS=%s). Shell commands run with Bash.", goos, goos)
+}
+
+func shellToolDescription(goos string) string {
+	if goos == "windows" {
+		return "Run a PowerShell-compatible command; PowerShell is the default shell on Windows."
+	}
+	return fmt.Sprintf("Run a Bash shell command on %s.", goos)
+}
+
 func filterRAGChunks(chunks []memory.RAGChunk, minScore float64) []memory.RAGChunk {
 	if minScore <= 0 {
 		return chunks

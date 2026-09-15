@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"runtime"
 	"strings"
 	"time"
 
@@ -404,7 +405,7 @@ func (m *LlamaCppModel) PlanNextStep(ctx context.Context, task *engine.Task) (*e
 	if strings.TrimSpace(system) == "" {
 		system = defaultSystemPrompt
 	}
-	system = system + "\n\n" + toolInstructions
+	system = system + "\n\n" + toolInstructions + "\n\n" + hostPlatformInstructions(runtime.GOOS)
 
 	user := fmt.Sprintf(`Task:
 %s
@@ -547,11 +548,15 @@ Otherwise answer briefly from knowledge.
 Do NOT invent local files or directories.`, task.Description)
 	}
 
-	messages := []LlamaMessage{}
-	if strings.TrimSpace(m.SystemPrompt) != "" {
-		messages = append(messages, LlamaMessage{Role: "system", Content: m.SystemPrompt})
+	system := m.SystemPrompt
+	if strings.TrimSpace(system) == "" {
+		system = defaultSystemPrompt
 	}
-	messages = append(messages, LlamaMessage{Role: "user", Content: prompt})
+	system = system + "\n\n" + hostPlatformInstructions(runtime.GOOS)
+	messages := []LlamaMessage{
+		{Role: "system", Content: system},
+		{Role: "user", Content: prompt},
+	}
 
 	var fullResponse string
 	var lastResp LlamaChatResponse

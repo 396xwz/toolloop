@@ -13,7 +13,8 @@ INDEX_PATH ?= .
 help:
 	@printf '%s\n' \
 		'Toolloop targets:' \
-		'  make build                 Build ./toolloop' \
+		'  make build                 Builds linux and windows ' \
+                '  make build-linux           Builds linux ./toolloop' \
 		'  make build-windows         Cross-build a Windows amd64 binary' \
 		'  make run                   Run the default llama.cpp backend' \
 		'  make repl                  Start the default llama.cpp REPL' \
@@ -27,7 +28,8 @@ help:
 		'  make index INDEX_PATH=dir  Index a directory into RAG' \
 		'  make clean                 Remove generated local artifacts'
 
-build:
+build: build-linux build-windows
+build-linux:
 	$(GO) build -o $(BIN) $(CMD)
 
 build-windows:

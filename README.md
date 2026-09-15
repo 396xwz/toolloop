@@ -81,6 +81,8 @@ docs/                architecture notes
   above the working directory or the compiled binary) with `.venv/bin/python3`;
   falls back to `python3`/`python` on `PATH`, or set `PYTHON_BIN` to an exact
   interpreter path.
+- Shell tool: Bash is required on Unix. On Windows, the shell tool uses Windows
+  PowerShell with `-NoProfile` and `-NonInteractive`.
 
 ## Architecture
 
@@ -108,7 +110,7 @@ JSON object such as:
 | Tool | Args | Notes |
 |------|------|-------|
 | `fs` | `op`, `path`, `depth`, `max_bytes`, `content`, `old_snippet`, `new_snippet`, `start_line`, `end_line`, `checksum` | Filesystem operations |
-| `shell` | `cmd` | Runs a shell command; leading `fs ...` commands are intercepted and executed by the fs tool |
+| `shell` | `cmd` | Runs Bash on Unix and Windows PowerShell (`-NoProfile`, `-NonInteractive`) on Windows; leading `fs ...` commands are intercepted and executed by the fs tool. Models receive OS-aware shell guidance. |
 | `browser` | `url` | Fetches URL text |
 | `web_search` | `query` | Web search helper |
 | `python` | `path`, `code`, `args`, `cwd`, `timeout` | Runs a script or inline source with the project's `.venv` interpreter (falls back to system `python3`/`python`) |

@@ -5,54 +5,43 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/396xwz/toolloop/internal/engine"
-	"github.com/ollama/ollama/api"
 )
 
-func TestResolveToolFromResponse_ContentJSON(t *testing.T) {
-	m := api.Message{Content: "{\"tool\": \"fs\", \"args\": {\"op\": \"write\", \"path\": \"sample.go\", \"content\": \"x\"}}"}
-	name, args, ok := resolveToolFromResponse(m)
-	if !ok || name != "fs" {
-		t.Fatalf("resolveToolFromResponse failed: %s %v %v", name, args, ok)
-	}
-}
-
-func TestOllamaGenerateFinalAnswerIncludesSystemPromptAndPlatformGuidance(t *testing.T) {
-	type message struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	}
-	var messages []message
+func TestLlamaGenerateFinalAnswerIncludesSystemPromptAndPlatformGuidance(t *testing.T) {
+	var messages []LlamaMessage
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/chat" {
-			t.Errorf("request path = %q, want /api/chat", r.URL.Path)
+		switch r.URL.Path {
+		case "/apply-template":
+			var request struct {
+				Messages []LlamaMessage `json:"messages"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatalf("decode apply-template request: %v", err)
+			}
+			messages = request.Messages
+			_, _ = w.Write([]byte(`{"prompt":"rendered prompt"}`))
+		case "/completion":
+			_, _ = w.Write([]byte(`{"content":"done","stop":true}`))
+		default:
+			t.Errorf("request path = %q, want /apply-template or /completion", r.URL.Path)
+			http.NotFound(w, r)
 		}
-		var request struct {
-			Messages []message `json:"messages"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			t.Fatalf("decode chat request: %v", err)
-		}
-		messages = request.Messages
-		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"done"},"done":true}` + "\n"))
 	}))
 	defer server.Close()
 
-	baseURL, err := url.Parse(server.URL)
-	if err != nil {
-		t.Fatalf("parse test server URL: %v", err)
-	}
-	model := &OllamaModel{
-		Client:       api.NewClient(baseURL, server.Client()),
+	model := &LlamaCppModel{
+		Client:       NewLlamaClient(server.URL),
 		Model:        "test-model",
 		SystemPrompt: "Custom agent constraint: answer in haiku.",
 	}
+	model.Client.HTTP = server.Client()
+
 	answer, err := model.GenerateFinalAnswer(context.Background(), &engine.Task{Description: "What is Go?"})
 	if err != nil {
 		t.Fatalf("GenerateFinalAnswer: %v", err)
@@ -71,5 +60,8 @@ func TestOllamaGenerateFinalAnswerIncludesSystemPromptAndPlatformGuidance(t *tes
 	}
 	if want := hostPlatformInstructions(runtime.GOOS); !strings.Contains(messages[0].Content, want) {
 		t.Errorf("system message missing platform guidance %q: %q", want, messages[0].Content)
+	}
+	if strings.Contains(messages[0].Content, toolInstructions) {
+		t.Errorf("system message unexpectedly contains tool instructions: %q", messages[0].Content)
 	}
 }

@@ -969,7 +969,7 @@ func (s ShellTool) Execute(ctx context.Context, args map[string]string) (string,
 		}
 	}
 
-	cmd := exec.CommandContext(ctx, "bash", "-c", cmdStr)
+	cmd := runShell(ctx, cmdStr)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return string(output), fmt.Errorf("command failed: %w", err)
