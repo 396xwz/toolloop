@@ -243,7 +243,7 @@ Type a task/question and press Enter.
 				handleAgentCommand(ctx, line, mgr, in, model, registry, mem, rag)
 				continue
 			}
-			if quit := handleREPLCommand(ctx, line, model, mem, rag, &mgr.current().Notes); quit {
+			if quit := handleREPLCommand(ctx, line, model, mem, rag, mgr.current()); quit {
 				break
 			}
 			continue
@@ -273,7 +273,7 @@ func handleREPLCommand(
 	model engine.ChatModel,
 	mem memory.Memory,
 	rag memory.RAG,
-	sessionNotes *strings.Builder,
+	session *replAgent,
 ) (quit bool) {
 	parts := strings.Fields(line)
 	cmd := strings.ToLower(parts[0])
@@ -327,7 +327,7 @@ Direct: fs read <path> | shell <cmd> | browser <url> | scrape <url> [output.md] 
 			fmt.Printf("[%s] %s\n%s\n\n", it.Kind, it.CreatedAt.Format(time.RFC3339), truncate(it.Content, 500))
 		}
 	case "/reset":
-		sessionNotes.Reset()
+		session.resetNotes()
 		fmt.Println("session history cleared (DB unchanged)")
 	case "/index":
 		if len(parts) < 2 {

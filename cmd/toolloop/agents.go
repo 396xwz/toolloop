@@ -27,7 +27,7 @@ const defaultAgentName = "main"
 type replAgent struct {
 	Name         string
 	SystemPrompt string
-	Notes        strings.Builder
+	notes        sessionNotes
 	CreatedAt    time.Time
 	Runs         int
 }
@@ -342,7 +342,7 @@ func (m *agentManager) create(name, prompt string) (*replAgent, error) {
 	}
 	if a, exists := m.agents[name]; exists {
 		a.SystemPrompt = prompt
-		a.Notes.Reset()
+		a.resetNotes()
 		a.Runs = 0
 		return a, nil
 	}
@@ -392,15 +392,103 @@ func (m *agentManager) list() []*replAgent {
 	return out
 }
 
-// appendNotes records a Q/A pair in the agent's own conversation history
-// and trims it so a long session cannot grow without bound.
-func (a *replAgent) appendNotes(question, answer string) {
-	a.Notes.WriteString(fmt.Sprintf("- Q: %s\n  A: %s\n", truncate(question, 200), truncate(answer, 400)))
-	if a.Notes.Len() > 8000 {
-		s := a.Notes.String()
-		a.Notes.Reset()
-		a.Notes.WriteString(s[len(s)/2:])
+// --- Session notes with summary compaction -------------------------
+//
+// A session's history is an LLM summary of older turns plus the most recent
+// raw turns. When the raw window grows past a threshold we ask the model to
+// fold the older turns into the summary (snapcompact-style) instead of
+// discarding them, so long sessions stay bounded while keeping the
+// setup/decisions that used to be dropped.
+
+const (
+	compactTriggerTurns = 10 // compact once raw turns exceed this
+	keepRecentTurns     = 6  // raw turns kept after compaction
+)
+
+const compactSystemPrompt = `You compress coding-agent conversation history into a compact summary. ` +
+	`Reply with the summary text only: no preamble, no headers, no code fences.`
+
+type sessionNote struct {
+	question string
+	answer   string
+}
+
+type sessionNotes struct {
+	summary string        // LLM summary of older, folded turns
+	recent  []sessionNote // most recent raw turns, oldest first
+}
+
+// render returns the session buffer shown to the model: the folded summary
+// (if any) followed by the recent raw turns.
+func (n *sessionNotes) render() string {
+	var b strings.Builder
+	if n.summary != "" {
+		b.WriteString("Earlier conversation (summary):\n" + n.summary + "\n\n")
 	}
+	for _, t := range n.recent {
+		b.WriteString("- Q: " + t.question + "\n  A: " + t.answer + "\n")
+	}
+	return b.String()
+}
+
+// appendNote records a Q/A pair in the agent's conversation history. Each
+// turn is truncated so a single turn cannot dominate the context.
+func (a *replAgent) appendNote(question, answer string) {
+	a.notes.recent = append(a.notes.recent, sessionNote{question: truncate(question, 200), answer: truncate(answer, 400)})
+}
+
+// notesString returns the rendered session buffer, or "" when empty.
+func (a *replAgent) notesString() string { return a.notes.render() }
+
+// resetNotes clears the agent's conversation history (summary and turns).
+func (a *replAgent) resetNotes() { a.notes = sessionNotes{} }
+
+// compactNotes folds older turns into the LLM summary so a long session stays
+// bounded without discarding setup/decisions. It only acts once the raw window
+// exceeds compactTriggerTurns. Best-effort: on model failure it falls back to
+// a bounded trim so the buffer cannot grow without bound.
+func (a *replAgent) compactNotes(ctx context.Context, model engine.ChatModel) error {
+	if model == nil || len(a.notes.recent) <= compactTriggerTurns {
+		return nil
+	}
+	cut := len(a.notes.recent) - keepRecentTurns
+	older, keep := a.notes.recent[:cut], a.notes.recent[cut:]
+
+	var b strings.Builder
+	b.WriteString("Fold the conversation history below into one compact summary.\n")
+	if a.notes.summary != "" {
+		b.WriteString("Previous summary:\n" + a.notes.summary + "\n\n")
+	}
+	b.WriteString("Older turns to fold in:\n")
+	for _, t := range older {
+		b.WriteString("- Q: " + t.question + "\n  A: " + t.answer + "\n")
+	}
+	b.WriteString("\nKeep it under 1500 characters. Preserve decisions, files/tools touched, " +
+		"constraints, open questions, and key facts. Omit small talk and verbatim code.\n")
+
+	prevPrompt := model.SystemPromptValue()
+	model.SetSystemPrompt(compactSystemPrompt)
+	defer model.SetSystemPrompt(prevPrompt)
+
+	task := &engine.Task{
+		ID:          fmt.Sprintf("compact-%s-%d", a.Name, time.Now().UnixNano()),
+		Description: b.String(),
+		CreatedAt:   time.Now(),
+		Status:      engine.TaskPending,
+		Steps:       []*engine.Step{},
+	}
+	summary, err := model.GenerateFinalAnswer(ctx, task)
+	if err != nil {
+		// Model unavailable/failed: bounded non-LLM trim (keep 2x the normal raw
+		// window) so the session cannot grow without bound.
+		if keep := keepRecentTurns * 2; len(a.notes.recent) > keep {
+			a.notes.recent = a.notes.recent[len(a.notes.recent)-keep:]
+		}
+		return err
+	}
+	a.notes.summary = strings.TrimSpace(summary)
+	a.notes.recent = keep
+	return nil
 }
 
 // runAgentTask runs one task using the given agent's system prompt and
@@ -419,8 +507,8 @@ func runAgentTask(
 	defer func() { model.SetSystemPrompt(prevPrompt) }()
 
 	desc := input
-	if ag.Notes.Len() > 0 {
-		desc = fmt.Sprintf("%s\n\nSession notes:\n%s", input, ag.Notes.String())
+	if ns := ag.notesString(); ns != "" {
+		desc = fmt.Sprintf("%s\n\nSession notes:\n%s", input, ns)
 	}
 
 	task := &engine.Task{
@@ -444,7 +532,8 @@ func runAgentTask(
 	}
 
 	ag.Runs++
-	ag.appendNotes(input, answer)
+	ag.appendNote(input, answer)
+	_ = ag.compactNotes(ctx, model)
 	if mem != nil {
 		_ = mem.Save(ctx, task.ID, "task_result", answer)
 	}
@@ -618,7 +707,8 @@ func handleAgentCommand(
 		fmt.Printf("\n[%s] %s\n\n", target.Name, answer)
 		// Let the calling agent see what its delegate reported.
 		if cur := mgr.current(); cur != nil && cur.Name != target.Name {
-			cur.appendNotes(fmt.Sprintf("delegated to %s: %s", target.Name, taskText), answer)
+			cur.appendNote(fmt.Sprintf("delegated to %s: %s", target.Name, taskText), answer)
+			_ = cur.compactNotes(ctx, model)
 		}
 
 	case "show", "prompt":
@@ -644,7 +734,7 @@ func handleAgentCommand(
 			fmt.Println("unknown agent:", name)
 			return
 		}
-		a.Notes.Reset()
+		a.resetNotes()
 		fmt.Printf("Cleared conversation history for %s (DB unchanged)\n", a.Name)
 
 	case "delete", "rm", "remove":
