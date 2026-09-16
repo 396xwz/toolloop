@@ -418,7 +418,8 @@ func (m *LlamaCppModel) PlanNextStep(ctx context.Context, task *engine.Task) (*e
 		}
 	}
 	if task.Memory != nil {
-		if items, err := task.Memory.Recent(ctx, 5); err == nil {
+		if items, err := task.Memory.Search(ctx, task.Description, 5); err == nil {
+			items = filterMemoryItems(items, 0.35)
 			memBlock = formatMemoryContext(items)
 		}
 	}

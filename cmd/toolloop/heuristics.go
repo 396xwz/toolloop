@@ -426,6 +426,19 @@ func filterRAGChunks(chunks []memory.RAGChunk, minScore float64) []memory.RAGChu
 	return out
 }
 
+func filterMemoryItems(items []memory.MemoryItem, minScore float64) []memory.MemoryItem {
+	if minScore <= 0 {
+		return items
+	}
+	out := make([]memory.MemoryItem, 0, len(items))
+	for _, it := range items {
+		if it.Score >= minScore {
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
 func formatRAGContext(chunks []memory.RAGChunk) string {
 	if len(chunks) == 0 {
 		return ""
@@ -444,9 +457,9 @@ func formatMemoryContext(items []memory.MemoryItem) string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("Recent memory:\n")
+	b.WriteString("Relevant memory (top-k):\n")
 	for _, it := range items {
-		b.WriteString(fmt.Sprintf("- [%s] %s\n", it.Kind, truncate(it.Content, 400)))
+		b.WriteString(fmt.Sprintf("- [%s] %s (score %.3f)\n", it.Kind, truncate(it.Content, 400), it.Score))
 	}
 	return b.String()
 }

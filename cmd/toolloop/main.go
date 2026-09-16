@@ -274,7 +274,7 @@ Options:
 		model.SetSystemPrompt(defaultSystemPrompt)
 	}
 
-	mem, err := memory.NewSQLiteMemory(memoryDBPath)
+	mem, err := memory.SQLiteMemoryV2(memoryDBPath, embedder)
 	if err != nil {
 		log.Fatalf("memory: %v", err)
 	}
