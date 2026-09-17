@@ -19,7 +19,7 @@ const (
 	TaskFailed    TaskStatus = "failed"
 )
 
-const MaxSteps = 8
+const MaxSteps = 32
 
 type Task struct {
 	ID          string
@@ -97,8 +97,12 @@ func (e *Engine) RunTask(ctx context.Context, task *Task) error {
 					step.Err = err
 					fmt.Printf("  → Tool %s executed (args: %v)\n", step.ToolCall.Name, step.ToolCall.Args)
 
-					// If this was an fs write that succeeded, consider the task complete to avoid asking the model again.
-					if err == nil && step.ToolCall.Name == "fs" {
+					// A successful fs write normally completes the task so the
+					// model is not asked again. Exception: when the agent tool
+					// is available, the write is usually one step of a larger
+					// delegated workflow (e.g. the orchestrator writing plan.md
+					// before handing off to sub-agents).
+					if err == nil && step.ToolCall.Name == "fs" && !hasAgentTool(task) {
 						if op, ok := step.ToolCall.Args["op"]; ok && op == "write" {
 							step.FinishedAt = time.Now()
 							task.Steps = append(task.Steps, step)
@@ -133,6 +137,13 @@ func (e *Engine) RunTask(ctx context.Context, task *Task) error {
 
 	task.Status = TaskFailed
 	return fmt.Errorf("reached max steps (%d)", MaxSteps)
+}
+
+// hasAgentTool reports whether the task's registry offers the agent
+// tool, i.e. the model can delegate work to named sub-agents.
+func hasAgentTool(task *Task) bool {
+	_, ok := task.Tools.Get("agent")
+	return ok
 }
 
 // isRepeatToolCall returns true if the same tool+args was already used

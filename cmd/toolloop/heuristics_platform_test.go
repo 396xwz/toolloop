@@ -31,3 +31,27 @@ func TestHostPlatformInstructionsUnix(t *testing.T) {
 		}
 	}
 }
+
+func TestIsPlanFile(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"plan.md", true},
+		{"./plan.md", true},
+		{"sub/dir/plan.md", true},
+		{"/abs/plan.md", true},
+		{" plan.md ", true},
+		{"plan", false},
+		{"plan.txt", false},
+		{"PLAN.MD", false},
+		{"plan.md.bak", false},
+		{"notes.md", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := isPlanFile(c.path); got != c.want {
+			t.Errorf("isPlanFile(%q) = %v, want %v", c.path, got, c.want)
+		}
+	}
+}

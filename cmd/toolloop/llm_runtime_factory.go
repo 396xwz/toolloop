@@ -349,7 +349,7 @@ func (m *OllamaModel) PlanNextStep(ctx context.Context, task *engine.Task) (*eng
 	if strings.TrimSpace(system) == "" {
 		system = defaultSystemPrompt
 	}
-	system = system + "\n\n" + toolInstructions + "\n\n" + hostPlatformInstructions(runtime.GOOS)
+	system = system + "\n\n" + toolInstructionsFor(task.Tools) + "\n\n" + hostPlatformInstructions(runtime.GOOS)
 
 	user := fmt.Sprintf(`Task:
 %s

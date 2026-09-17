@@ -170,6 +170,31 @@ func tryDirectToolLine(ctx context.Context, line string, registry tools.ToolRegi
 		}
 		fmt.Println(truncate(out, 8000))
 		return true
+	case "agent":
+		if len(fields) < 3 {
+			fmt.Println("usage: agent <name> <task...>")
+			return true
+		}
+		tool, ok := registry.Get("agent")
+		if !ok {
+			fmt.Println("agent tool not registered")
+			return true
+		}
+		taskText := strings.TrimSpace(line[len(fields[0])+len(fields[1]):])
+		if taskText == "" {
+			fmt.Println("usage: agent <name> <task...>")
+			return true
+		}
+		out, err := tool.Execute(ctx, map[string]string{"name": fields[1], "task": taskText})
+		if err != nil {
+			fmt.Println("Agent error:", err)
+			if out != "" {
+				fmt.Println(out)
+			}
+			return true
+		}
+		fmt.Println(truncate(out, 8000))
+		return true
 	}
 	return false
 }
@@ -205,6 +230,7 @@ Direct tools (no model):
   browser https://go.dev
   scrape https://example.com sports.md
   python python/wnba.py
+  agent tester run the tests
 
 Type a task/question and press Enter.
 `)
@@ -223,6 +249,7 @@ Type a task/question and press Enter.
 		fmt.Printf("Loaded agent roles from %s (%s)\n", agentsMDPath, strings.Join(loaded, ", "))
 	}
 	mgr := newAgentManager(model.SystemPromptValue())
+	registry.Register("agent", agentTool{mgr: mgr, model: model, registry: registry, mem: mem, rag: rag})
 
 	for {
 		fmt.Printf("%s> ", mgr.active)
@@ -253,7 +280,7 @@ Type a task/question and press Enter.
 		}
 
 		currentAgent := mgr.current()
-		answer, err := runAgentTask(ctx, model, registry, mem, rag, currentAgent, line)
+		answer, err := runAgentTask(ctx, mgr, model, registry, mem, rag, currentAgent, line)
 		if err != nil {
 			fmt.Println("Task failed:", err)
 			continue

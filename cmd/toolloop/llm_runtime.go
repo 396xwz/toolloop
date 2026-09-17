@@ -428,7 +428,7 @@ func (m *LlamaCppModel) PlanNextStep(ctx context.Context, task *engine.Task) (*e
 	if strings.TrimSpace(system) == "" {
 		system = defaultSystemPrompt
 	}
-	system = system + "\n\n" + toolInstructions + "\n\n" + hostPlatformInstructions(runtime.GOOS)
+	system = system + "\n\n" + toolInstructionsFor(task.Tools) + "\n\n" + hostPlatformInstructions(runtime.GOOS)
 
 	user := fmt.Sprintf(`Task:
 %s
@@ -448,6 +448,10 @@ Call a tool if needed. Otherwise respond with a short note that no tool is requi
 		if s.ToolCall != nil && s.ToolCall.Name != "" {
 			res := truncate(s.Result, maxStepResultChars)
 			messages = append(messages, LlamaMessage{Role: "assistant", Content: fmt.Sprintf("Tool %s returned: %s", s.ToolCall.Name, res)})
+		} else if strings.HasPrefix(strings.TrimSpace(s.Plan), "Blocked:") {
+			// Blocked steps carry no ToolCall; surface the block reason so the
+			// model sees its own blocked attempts and adapts.
+			messages = append(messages, LlamaMessage{Role: "assistant", Content: s.Plan})
 		}
 	}
 	messages = append(messages, LlamaMessage{Role: "user", Content: user})
@@ -494,18 +498,22 @@ Call a tool if needed. Otherwise respond with a short note that no tool is requi
 		path := sanitizePath(args["path"])
 		args["path"] = path
 
-		if op != "" && !taskAllowsFSOp(task.Description, op) {
-			d := strings.ToLower(task.Description)
-			if !(strings.Contains(d, "read") || strings.Contains(d, "open") ||
-				strings.Contains(d, "file") || strings.Contains(d, "list") ||
-				strings.Contains(d, "tree") || strings.Contains(d, "write")) {
-				step.Plan = "Blocked: fs op not allowed by task text"
+		// plan.md is the orchestrator's working file; exempt it from both
+		// gates so the main REPL agent can always read/write its plan.
+		if !isPlanFile(path) {
+			if op != "" && !taskAllowsFSOp(task.Description, op) {
+				d := strings.ToLower(task.Description)
+				if !(strings.Contains(d, "read") || strings.Contains(d, "open") ||
+					strings.Contains(d, "file") || strings.Contains(d, "list") ||
+					strings.Contains(d, "tree") || strings.Contains(d, "write")) {
+					step.Plan = "Blocked: fs op not allowed by task text"
+					return step, nil
+				}
+			}
+			if path != "" && !isAllowedFSPath(task.Description, path) {
+				step.Plan = "Blocked: path not mentioned in task"
 				return step, nil
 			}
-		}
-		if path != "" && !isAllowedFSPath(task.Description, path) {
-			step.Plan = "Blocked: path not mentioned in task"
-			return step, nil
 		}
 	}
 

@@ -46,6 +46,10 @@ Responsibilities:
 - Spawn/delegate to the planner, researcher, builder, reviewer and tester agents.
 - Merge the results those agents report back into a single coherent outcome.
 
+Delegate with the agent tool; the sub-agent's final answer is returned as the
+tool result:
+{"tool":"agent","args":{"name":"builder","task":"Implement Step 3"}}
+
 Output format:
 - A JSON array of task objects, each like
   {"id":"1","agent":"builder","task":"...","acceptance":"..."}
@@ -277,6 +281,10 @@ type agentManager struct {
 	agents map[string]*replAgent
 	order  []string
 	active string
+	// running is the stack of agents whose task is currently executing,
+	// innermost last. It backs the agent tool's delegation depth limit and
+	// delegation-note attribution. Only the single REPL goroutine touches it.
+	running []*replAgent
 }
 
 func newAgentManager(defaultPrompt string) *agentManager {
@@ -319,6 +327,22 @@ func (m *agentManager) get(name string) (*replAgent, bool) {
 		return a, true
 	}
 	return nil, false
+}
+
+// pushRunning marks an agent as executing so nested agent tool calls can see
+// the delegation stack.
+func (m *agentManager) pushRunning(a *replAgent) {
+	m.running = append(m.running, a)
+}
+
+// popRunning clears the innermost executing agent.
+func (m *agentManager) popRunning() {
+	m.running = m.running[:len(m.running)-1]
+}
+
+// roleNames lists every known agent name for error messages.
+func (m *agentManager) roleNames() string {
+	return strings.Join(m.order, ", ")
 }
 
 func (m *agentManager) current() *replAgent {
@@ -495,6 +519,7 @@ func (a *replAgent) compactNotes(ctx context.Context, model engine.ChatModel) er
 // conversation notes, leaving the model's own prompt untouched afterwards.
 func runAgentTask(
 	ctx context.Context,
+	mgr *agentManager,
 	model engine.ChatModel,
 	registry tools.ToolRegistry,
 	mem memory.Memory,
@@ -505,6 +530,8 @@ func runAgentTask(
 	prevPrompt := model.SystemPromptValue()
 	model.SetSystemPrompt(ag.SystemPrompt)
 	defer func() { model.SetSystemPrompt(prevPrompt) }()
+	mgr.pushRunning(ag)
+	defer mgr.popRunning()
 
 	desc := input
 	if ns := ag.notesString(); ns != "" {
@@ -540,6 +567,44 @@ func runAgentTask(
 	return answer, nil
 }
 
+// maxAgentDepth caps how deeply the agent tool may nest: the running stack
+// may hold at most this many agents (top-level task + nested delegations).
+const maxAgentDepth = 3
+
+// agentTool lets the model delegate a task to another named agent. The
+// sub-agent runs its own tool loop with its own system prompt and session
+// notes; its final answer is returned as the tool result so the delegating
+// agent can continue from it.
+type agentTool struct {
+	mgr      *agentManager
+	model    engine.ChatModel
+	registry tools.ToolRegistry
+	mem      memory.Memory
+	rag      memory.RAG
+}
+
+func (a agentTool) Name() string { return "agent" }
+
+func (a agentTool) Execute(ctx context.Context, args map[string]string) (string, error) {
+	name := normalizeAgentName(args["name"])
+	taskText := strings.TrimSpace(args["task"])
+	if name == "" {
+		return "", fmt.Errorf("agent tool: \"name\" argument is required")
+	}
+	if taskText == "" {
+		return "", fmt.Errorf("agent tool: \"task\" argument is required")
+	}
+	if len(a.mgr.running) >= maxAgentDepth {
+		return "", fmt.Errorf("agent tool: delegation depth limit (%d) reached; finish the current task instead of spawning another agent", maxAgentDepth)
+	}
+	target, ok := a.mgr.get(name)
+	if !ok {
+		return "", fmt.Errorf("agent tool: unknown agent %q; known agents: %s", name, a.mgr.roleNames())
+	}
+	fmt.Printf("[%s] delegating to %s: %s\n", a.mgr.active, target.Name, truncate(taskText, 160))
+	return runAgentTask(ctx, a.mgr, a.model, a.registry, a.mem, a.rag, target, taskText)
+}
+
 // readMultilinePrompt collects prompt lines until a line containing only
 // "." (or EOF). Used when /agent create is given no inline prompt.
 func readMultilinePrompt(in *bufio.Scanner) string {
@@ -573,6 +638,9 @@ func agentUsage() {
   /agent show [name]              Show an agent's system prompt
   /agent reset [name]             Clear an agent's conversation history
   /agent delete <name>            Remove an agent
+
+The model can also delegate on its own via the agent tool:
+  {"tool":"agent","args":{"name":"builder","task":"Implement Step 3"}}
 
 Built-in role prompts: ` + strings.Join(builtinRoleNames(), ", ") + agentsMDSourceNote())
 }
@@ -699,7 +767,7 @@ func handleAgentCommand(
 		idx := strings.Index(line, fields[3])
 		taskText := strings.TrimSpace(line[idx:])
 		fmt.Printf("[%s] running: %s\n", target.Name, truncate(taskText, 160))
-		answer, err := runAgentTask(ctx, model, registry, mem, rag, target, taskText)
+		answer, err := runAgentTask(ctx, mgr, model, registry, mem, rag, target, taskText)
 		if err != nil {
 			fmt.Println("Task failed:", err)
 			return

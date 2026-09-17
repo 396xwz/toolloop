@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/396xwz/toolloop/internal/memory"
+	"github.com/396xwz/toolloop/internal/tools"
 )
 
 func mapFSOp(s string) string {
@@ -387,8 +388,18 @@ const toolInstructions = `Available tools:
 6. python - run a Python script or inline code with the project's interpreter
    args: path (script file), or code (inline source), args (extra CLI args), cwd, timeout (seconds, default 60)
    use this instead of "shell cmd=python3 ..." so the project's own .venv interpreter is used
+`
 
-To call a tool, reply with ONLY a single JSON object, no prose, no markdown fences:
+// agentToolInstructions is appended to the tool list when the agent tool is
+// registered (REPL mode), so the model learns it can delegate to other agents.
+const agentToolInstructions = `7. agent - delegate a task to another named agent (e.g. builder, tester, reviewer, planner)
+   args: name (agent name), task (the task text to run as that agent)
+   the sub-agent runs its own full tool loop with its own system prompt and session notes; its final answer is returned as this tool's result
+   use it to hand a step to a role, then continue with whatever it reports back
+`
+
+// toolCallProtocol is the JSON reply protocol appended after the tool list.
+const toolCallProtocol = `To call a tool, reply with ONLY a single JSON object, no prose, no markdown fences:
 {"tool":"fs","args":{"op":"read","path":"README.md"}}
 
 Rules:
@@ -398,6 +409,17 @@ Rules:
 - For dynamic sports pages or pages where browser returns app shell HTML, prefer scrape over browser.
 - To run a Python script or code, use the python tool, not shell.
 - If no tool is needed, reply with a short plain-text note instead (no JSON).`
+
+// toolInstructionsFor builds the model-facing tool instructions from what the
+// task's registry actually contains: the static tools 1-6 plus the agent tool
+// when it is registered (REPL mode).
+func toolInstructionsFor(reg tools.ToolRegistry) string {
+	s := toolInstructions
+	if _, ok := reg.Get("agent"); ok {
+		s += agentToolInstructions
+	}
+	return s + toolCallProtocol
+}
 
 func hostPlatformInstructions(goos string) string {
 	if goos == "windows" {
@@ -499,6 +521,18 @@ func extractPaths(s string) []string {
 		}
 	}
 	return paths
+}
+
+// isPlanFile reports whether path points to the orchestrator's working file
+// plan.md (any directory depth, optional ./ prefix). Such paths are exempt
+// from the task-text fs gates so the main REPL agent can always read and
+// write its plan.
+func isPlanFile(path string) bool {
+	base := strings.TrimPrefix(strings.TrimSpace(path), "./")
+	if i := strings.LastIndex(base, "/"); i >= 0 {
+		base = base[i+1:]
+	}
+	return base == "plan.md"
 }
 
 func isAllowedFSPath(taskDesc, path string) bool {
