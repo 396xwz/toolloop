@@ -143,6 +143,91 @@ func TestAgentToolEnforcesDepthLimit(t *testing.T) {
 	}
 }
 
+// The prompt arg implements model-driven agent creation on demand: an unknown
+// name plus a prompt creates a new agent and the task runs as it. A prompt
+// for an existing agent is ignored — the model can never replace or re-prompt
+// a user-defined agent, including "main".
+func TestAgentToolPromptArgCreatesAgentsOnDemand(t *testing.T) {
+	model := &fakeChatModel{
+		prompt: "main",
+		script: []*engine.Step{nil}, // sub-agent loop: finish immediately
+		final:  "done",
+	}
+	tool, mgr, _ := newAgentToolForTest(t, model)
+
+	// (a) Unknown name without a prompt: error, nothing created.
+	_, err := tool.Execute(context.Background(), map[string]string{
+		"name": "ghost", "task": "do it",
+	})
+	if err == nil {
+		t.Fatal("unknown agent without prompt: expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "/agent create") {
+		t.Fatalf("error = %q, want it to point at /agent create", err)
+	}
+	if _, ok := mgr.get("ghost"); ok {
+		t.Fatal("agent \"ghost\" was created without a prompt")
+	}
+
+	// (b) Unknown name plus prompt: the agent is created with that prompt
+	// and the task runs as the created agent.
+	answer, err := tool.Execute(context.Background(), map[string]string{
+		"name": "ghost", "task": "do it", "prompt": "You are a ghost.",
+	})
+	if err != nil {
+		t.Fatalf("Execute with prompt: %v", err)
+	}
+	if answer != "done" {
+		t.Fatalf("answer = %q, want %q", answer, "done")
+	}
+	created, ok := mgr.get("ghost")
+	if !ok {
+		t.Fatal("prompt arg did not create agent \"ghost\"")
+	}
+	if created.SystemPrompt != "You are a ghost." {
+		t.Fatalf("created agent prompt = %q, want %q", created.SystemPrompt, "You are a ghost.")
+	}
+	if created.Runs != 1 {
+		t.Fatalf("ghost.Runs = %d, want 1", created.Runs)
+	}
+	if !strings.Contains(strings.Join(model.systemLog, "\n"), "You are a ghost.") {
+		t.Fatalf("task did not run under the created prompt; systemLog = %v", model.systemLog)
+	}
+
+	// (c) Existing agent plus prompt: delegation runs, but the stored prompt
+	// is untouched (creation only, never re-prompt).
+	tester, err := mgr.create("tester", "You are the tester.")
+	if err != nil {
+		t.Fatalf("create tester: %v", err)
+	}
+	if _, err := tool.Execute(context.Background(), map[string]string{
+		"name": "tester", "task": "run the tests", "prompt": "You are a pirate.",
+	}); err != nil {
+		t.Fatalf("Execute with prompt: %v", err)
+	}
+	if got := tester.SystemPrompt; got != "You are the tester." {
+		t.Fatalf("prompt arg overrode system prompt: %q", got)
+	}
+	if tester.Runs != 1 {
+		t.Fatalf("tester.Runs = %d, want 1", tester.Runs)
+	}
+
+	// (d) "main" plus prompt: the default conversation can never be replaced
+	// by a tool call.
+	main, err := mgr.create("main", "You are main.")
+	if err != nil {
+		t.Fatalf("re-create main: %v", err)
+	}
+	if _, err := tool.Execute(context.Background(), map[string]string{
+		"name": "main", "task": "hello", "prompt": "You are a pirate.",
+	}); err != nil {
+		t.Fatalf("Execute as main: %v", err)
+	}
+	if got := main.SystemPrompt; got != "You are main." {
+		t.Fatalf("prompt arg overrode main's prompt: %q", got)
+	}
+}
+
 // resultTool is a registry tool that always returns a fixed output.
 type resultTool struct {
 	name string

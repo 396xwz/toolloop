@@ -392,11 +392,21 @@ const toolInstructions = `Available tools:
 
 // agentToolInstructions is appended to the tool list when the agent tool is
 // registered (REPL mode), so the model learns it can delegate to other agents.
-const agentToolInstructions = `7. agent - delegate a task to another named agent (e.g. builder, tester, reviewer, planner)
-   args: name (agent name), task (the task text to run as that agent)
+// The prompt arg creates agents on demand: for an unknown name it defines a
+// new agent (model-driven creation); for an existing name it is ignored, so
+// the model can never replace or re-prompt a user-defined agent.
+const agentToolInstructions = `7. agent - delegate a task to a named agent (e.g. builder, tester, reviewer, planner)
+   args:
+   - name (required): the agent name. If it does not exist yet, pair it with "prompt" to create it on the fly.
+   - task (required): the task text to run as that agent.
+   - prompt (optional): system prompt for the agent. Used ONLY when "name" is not an existing agent: a new agent is created with this prompt and the task is then run as it. For existing agents the prompt is ignored — a tool call can never replace or re-prompt an agent the user defined via /agent create. Created agents persist for the session and are visible to the user via /agent list (the user can delete them).
    the sub-agent runs its own full tool loop with its own system prompt and session notes; its final answer is returned as this tool's result
-   use it to hand a step to a role, then continue with whatever it reports back
-`
+   When the task is a role's job, make the agent tool your FIRST tool call, before any shell or fs call:
+   tester (run or check tests), builder (write or modify code),
+   reviewer (review code), planner (plan a change), researcher (survey files or gather information)
+   Delegate role jobs even when they could be done with a single command.
+   Do work yourself only when no role fits the task: a single fs read, one shell command, a quick lookup, or answering from context.
+   Example (delegate, not shell): {"tool":"agent","args":{"name":"tester","task":"Run go test ./cmd/toolloop/... and report pass/fail"}}`
 
 // toolCallProtocol is the JSON reply protocol appended after the tool list.
 const toolCallProtocol = `To call a tool, reply with ONLY a single JSON object, no prose, no markdown fences:

@@ -501,6 +501,7 @@ func (a *replAgent) compactNotes(ctx context.Context, model engine.ChatModel) er
 		Status:      engine.TaskPending,
 		Steps:       []*engine.Step{},
 	}
+	fmt.Printf("  → %s thinking… (compacting notes)\n", a.Name)
 	summary, err := model.GenerateFinalAnswer(ctx, task)
 	if err != nil {
 		// Model unavailable/failed: bounded non-LLM trim (keep 2x the normal raw
@@ -538,6 +539,11 @@ func runAgentTask(
 		desc = fmt.Sprintf("%s\n\nSession notes:\n%s", input, ns)
 	}
 
+	label := ag.Name
+	if d := len(mgr.running); d > 1 {
+		label = fmt.Sprintf("%s (depth %d)", ag.Name, d)
+	}
+
 	task := &engine.Task{
 		ID:          fmt.Sprintf("repl-%s-%d", ag.Name, time.Now().UnixNano()),
 		Description: desc,
@@ -547,12 +553,14 @@ func runAgentTask(
 		Memory:      mem,
 		RAG:         rag,
 		Tools:       registry,
+		Label:       label,
 	}
 
 	taskEngine := &engine.Engine{Model: model}
 	if err := taskEngine.RunTask(ctx, task); err != nil {
 		return "", err
 	}
+	fmt.Printf("  → %s thinking… (final answer)\n", label)
 	answer, err := model.GenerateFinalAnswer(ctx, task)
 	if err != nil {
 		return "", err
@@ -599,8 +607,24 @@ func (a agentTool) Execute(ctx context.Context, args map[string]string) (string,
 	}
 	target, ok := a.mgr.get(name)
 	if !ok {
-		return "", fmt.Errorf("agent tool: unknown agent %q; known agents: %s", name, a.mgr.roleNames())
+		prompt := strings.TrimSpace(args["prompt"])
+		if prompt == "" {
+			return "", fmt.Errorf("agent tool: unknown agent %q and no prompt given; create one with /agent create %s \"prompt\" (known agents: %s)", name, name, a.mgr.roleNames())
+		}
+		// Model-driven creation: the tool call supplies a system prompt for a
+		// brand-new agent. Only unknown names reach this branch, so existing
+		// agents (including "main") can never be replaced or re-prompted by
+		// the model. Created agents persist in the manager and are visible
+		// to the user via /agent list.
+		created, err := a.mgr.create(name, prompt)
+		if err != nil {
+			return "", fmt.Errorf("agent tool: cannot create agent %q: %w", name, err)
+		}
+		fmt.Printf("[%s] created agent %s from tool prompt\n", a.mgr.active, created.Name)
+		target = created
 	}
+	// For existing agents, args["prompt"] is ignored: a tool call can create
+	// an agent but never replace or re-prompt an existing one.
 	fmt.Printf("[%s] delegating to %s: %s\n", a.mgr.active, target.Name, truncate(taskText, 160))
 	return runAgentTask(ctx, a.mgr, a.model, a.registry, a.mem, a.rag, target, taskText)
 }
@@ -639,8 +663,10 @@ func agentUsage() {
   /agent reset [name]             Clear an agent's conversation history
   /agent delete <name>            Remove an agent
 
-The model can also delegate on its own via the agent tool:
-  {"tool":"agent","args":{"name":"builder","task":"Implement Step 3"}}
+The model can also delegate on its own via the agent tool. For an unknown
+name plus a prompt it creates a new agent on the fly (visible here, deletable
+with /agent delete); for existing agents the prompt arg is ignored:
+  {"tool":"agent","args":{"name":"qa","prompt":"You are a QA specialist.","task":"Check error paths"}}
 
 Built-in role prompts: ` + strings.Join(builtinRoleNames(), ", ") + agentsMDSourceNote())
 }

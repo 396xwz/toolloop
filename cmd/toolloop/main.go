@@ -20,7 +20,7 @@ const (
 	embedModel       = "nomic-embed-text"
 	memoryDBPath     = "agent_memory.db"
 	ragDBPath        = "agent_rag.db"
-	Timeout          = 240
+	Timeout          = 480
 	defaultIndexRoot = "documents"
 
 	maxStepResultChars         = 4000
@@ -35,7 +35,8 @@ For files use fs op=read or fs op=read_many.
 For Python scripts or Python code, use the python tool. Example: python path=python/wnba2.py.
 The python tool can run scripts under the repo's python/ directory using the project's .venv interpreter.
 When calling fs, always set op and path as plain strings (e.g. op=read, path=README.md).
-If you already have enough information from previous steps or retrieved context, do not call any tool.`
+If you already have enough information from previous steps or retrieved context, do not call any tool.
+If the agent tool is listed under Available tools, use it as described there instead of doing that role's work yourself.`
 )
 
 var debugMode bool
@@ -66,6 +67,8 @@ func runTasks(
 	initialContext string,
 	mem memory.Memory,
 	rag memory.RAG,
+	agentMgr *agentManager,
+	agentTarget *replAgent,
 ) {
 	var previousResults strings.Builder
 	if initialContext != "" {
@@ -81,6 +84,19 @@ func runTasks(
 		if previousResults.Len() > 0 {
 			fullDescription = fmt.Sprintf("%s\n\nContext from previous tasks:\n%s", taskDesc, previousResults.String())
 		}
+		var finalAnswer string
+		var err error
+		if agentTarget != nil {
+			finalAnswer, err = runAgentTask(ctx, agentMgr, model, registry, mem, rag, agentTarget, fullDescription)
+			if err != nil {
+				msg := fmt.Sprintf("Task failed: %v\n", err)
+				fmt.Print(msg)
+				if output != nil {
+					output.WriteString(msg)
+				}
+				continue
+			}
+		} else {
 		task := &engine.Task{
 			ID:          fmt.Sprintf("task-%d-%d", time.Now().Unix(), i),
 			Description: fullDescription,
@@ -90,6 +106,7 @@ func runTasks(
 			Memory:      mem,
 			RAG:         rag,
 			Tools:       registry,
+			Label:       "main",
 		}
 		taskEngine := &engine.Engine{Model: model}
 		if err := taskEngine.RunTask(ctx, task); err != nil {
@@ -100,7 +117,8 @@ func runTasks(
 			}
 			continue
 		}
-		finalAnswer, err := model.GenerateFinalAnswer(ctx, task)
+		fmt.Printf("  → main thinking… (final answer)\n")
+		finalAnswer, err = model.GenerateFinalAnswer(ctx, task)
 		if err != nil {
 			finalAnswer = "Failed to generate final answer: " + err.Error()
 		}
@@ -179,6 +197,7 @@ func runTasks(
 		if mem != nil {
 			_ = mem.Save(ctx, task.ID, "task_result", finalAnswer)
 		}
+		}
 		fmt.Println("Task completed.")
 		fmt.Println("Final Answer:")
 		fmt.Println(finalAnswer)
@@ -207,6 +226,7 @@ func main() {
 	skipIndex := flag.Bool("skip-index", false, "Skip automatic indexing of ./documents when it exists")
 	modelName := flag.String("model", defaultModel, "Model name/label; llama.cpp serves one loaded model")
 	replMode := flag.Bool("repl", false, "Interactive REPL mode")
+	agentName := flag.String("agent", "", "Run -task as the named agent (role from AGENTS.md or built-in roles)")
 	// prompt file option to override default system prompt
 	promptFile := flag.String("prompt", "", "Prompt file to use as system prompt")
 	debugFlag := flag.Bool("debug", false, "Enable debug logging")
@@ -218,6 +238,7 @@ func main() {
 		log.Fatal(`Usage:
   go run ./cmd/toolloop -repl
   go run ./cmd/toolloop -task "..."
+  go run ./cmd/toolloop -agent orchestrator -task "..."
   go run ./cmd/toolloop -index documents
   go run ./cmd/toolloop -backend ollama -model qwen2.5:14b -task "..."
   go run ./cmd/toolloop -scrape "https://example.com" -scrape-output sports.md
@@ -229,7 +250,8 @@ Notes:
 Options:
   -backend llama.cpp|ollama
   -server <url>    llama.cpp server URL (default http://localhost:8080)
-  -prompt <file>   Prompt file to use as system prompt`)
+  -prompt <file>   Prompt file to use as system prompt
+  -agent <name>   Run -task as the named agent (roles from AGENTS.md)`)
 	}
 
 	ctx := context.Background()
@@ -323,6 +345,26 @@ Options:
 		return
 	}
 
+	// -agent: run -task under the named agent's system prompt, the same
+	// path the REPL's /agent run uses. The agent tool is registered so
+	// roles like orchestrator can delegate to subagents.
+	var agentMgr *agentManager
+	var agentTarget *replAgent
+	if *agentName != "" {
+		if len(tasks) == 0 {
+			log.Fatal("-agent requires -task")
+		}
+		loadAgentsMarkdown()
+		agentMgr = newAgentManager(model.SystemPromptValue())
+		registry.Register("agent", agentTool{mgr: agentMgr, model: model, registry: registry, mem: mem, rag: rag})
+		target, ok := agentMgr.get(*agentName)
+		if !ok {
+			log.Fatalf("unknown agent: %s (available: %s)", *agentName, agentMgr.roleNames())
+		}
+		agentTarget = target
+		fmt.Printf("Running task(s) as agent %q\n", target.Name)
+	}
+
 	var initialContext strings.Builder
 	if *webQuery != "" {
 		tool, _ := registry.Get("web_search")
@@ -386,7 +428,7 @@ Options:
 		return
 	}
 	var outputBuilder strings.Builder
-	runTasks(ctx, model, registry, tasks, &outputBuilder, initialContext.String(), mem, rag)
+	runTasks(ctx, model, registry, tasks, &outputBuilder, initialContext.String(), mem, rag, agentMgr, agentTarget)
 	if *outputFile != "" {
 		if err := os.WriteFile(*outputFile, []byte(outputBuilder.String()), 0644); err != nil {
 			log.Fatalf("Failed to write output file: %v", err)

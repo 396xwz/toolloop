@@ -38,7 +38,7 @@ have been removed.
 
 ## Features
 
-- Tools: `fs`, `shell`, `browser`, `web_search`, `scrape`, `python`.
+- Tools: `fs`, `shell`, `browser`, `web_search`, `scrape`, `python`, `agent`.
 - `fs` supports `list`, `tree`, `read`, `read_many`, `info`, `write`, and safe
   `edit` by unique substring replacement.
 - `python` runs a script (`path`) or inline source (`code`) using the
@@ -48,7 +48,7 @@ have been removed.
 - Directory indexing with `-index`; if `./documents` exists it is indexed
   automatically on startup unless you pass `-skip-index`.
 - Multi-task CLI with repeatable `-task` and shared context between tasks.
-- REPL mode with direct tools and named sub-agents loaded from `AGENTS.md`.
+- REPL mode with direct tools, named sub-agents loaded from `AGENTS.md`, and the `agent` tool so the model can delegate tasks to them (and create new ones on the fly).
 - Prompt override with `-prompt <file>`.
 - Debug traces with `-debug`, including prompt sizes and tool parsing details.
 
@@ -136,6 +136,7 @@ JSON object such as:
 | `web_search` | `query` | Web search helper |
 | `python` | `path`, `code`, `args`, `cwd`, `timeout` | Runs a script or inline source with the project's `.venv` interpreter (falls back to system `python3`/`python`) |
 | `scrape` | `url`, `output`, `mode`, `selector`, `timeout`, `wait`, `max_chars` | Uses Scrapling for dynamic pages; writes full output to a file and returns a capped excerpt |
+| `agent` | `name`, `task`, `prompt` | Delegates a task to a named agent that runs its own full tool loop with its own system prompt and session notes. Registered in REPL mode and for `-agent` batch runs. `prompt` creates an unknown agent on the fly; for an existing agent it is ignored, so a tool call can never replace or re-prompt a user-defined agent. |
 
 ### `fs edit`
 
@@ -198,6 +199,7 @@ directory or the compiled binary → `python3`/`python` on `PATH`.
 | `-task` | Task description; repeatable |
 | `-backend` | Model backend: `llama.cpp` (default) or `ollama` |
 | `-repl` | Interactive REPL mode |
+| `-agent` | Run `-task` as the named agent (role from `AGENTS.md` or built-in roles); enables sub-agent delegation |
 | `-server` | llama.cpp server base URL (default `http://localhost:8080`) |
 | `-model` | Model name/label; with llama.cpp this is informational because the server serves one loaded model |
 | `-index` | Index a directory into RAG |
@@ -218,7 +220,9 @@ directory or the compiled binary → `python3`/`python` on `PATH`.
   are not justified by the task in guarded paths.
 - Repeated identical tool calls are detected and stopped.
 - A successful `fs write` stops the loop immediately to avoid an unnecessary
-  follow-up model call on slower backends.
+  follow-up model call on slower backends, unless the `agent` tool is
+  registered (REPL mode, `-agent` runs): there the write is one step of a
+  larger workflow, so the loop continues and the agent can delegate next.
 - Large tool results are capped before being fed back into the model to avoid
   overflowing llama.cpp context; full scrape output is still written to disk.
 - `GenerateFinalAnswer` includes the active agent's system prompt, so custom
@@ -245,6 +249,12 @@ Basic task:
 
 ```bash
 go run ./cmd/toolloop -task "Summarize what this project does"
+```
+
+Run a task under a named agent (e.g. the orchestrator role from `AGENTS.md`):
+
+```bash
+go run ./cmd/toolloop -agent orchestrator -task "Create a Python file called add.py that adds two numbers"
 ```
 
 Run the default llama.cpp backend:
@@ -367,6 +377,38 @@ process.
 /agent delete <name>            Remove an agent
 ```
 
+The model can also create agents. The `agent` tool is registered in REPL mode,
+so the model may delegate to named agents on its own; if it passes an unknown
+`name` together with a `prompt`, the tool creates that agent on the fly and
+runs the task as it:
+
+```json
+{"tool":"agent","args":{"name":"qa","prompt":"You are a QA specialist. Check every error path before replying.","task":"Check the error paths in cmd/toolloop"}}
+```
+
+```
+main> Check the error paths before we ship
+[main] created agent qa from tool prompt
+[main] delegating to qa: Check the error paths in cmd/toolloop
+```
+
+Creation rules:
+- Unknown `name` **without** a `prompt`: the call errors and points at
+  `/agent create`; nothing is created.
+- Unknown `name` **with** a `prompt`: a new agent is created with exactly
+  that prompt and the task runs as it. Created agents persist for the session
+  and show up in `/agent list` (deletable with `/agent delete`).
+- Existing agent: the `prompt` arg is **ignored** — a tool call can create
+  agents but can never replace or re-prompt one the user defined, and `main`
+  can never be replaced.
+
+```
+main> /agent list
+Agents (2):
+ * main           runs=1  prompt: You are a helpful assistant...
+   qa              runs=1  prompt: You are a QA specialist. Check every error path before replying.
+```
+
 Built-in role prompts are **auto-loaded from [`AGENTS.md`](AGENTS.md)** at REPL
 startup: it searches the current directory and its parents (so it is found
 when you run from the repository root), parses each `## role`
@@ -466,8 +508,6 @@ Notes:
   clears that agent's notes/runs.
 - Agents live for the duration of the REPL session; they are not persisted
   across restarts.
-- Delegation is driven by you typing `/agent run` — the model cannot yet spawn
-  a sub-agent on its own (see TODO).
 
 ## Model notes
 
@@ -484,12 +524,4 @@ Multi-tool calls per step
 
 ## TODO
 
-- **Make the agent a callable tool.** Today `/agent run` is driven by the user
-  typing the command; the model cannot delegate on its own. Register an `agent`
-  tool (args: `name`, `task`, and optionally `prompt` to create-on-demand) so an
-  orchestrator can emit
-  `{"tool":"agent","args":{"name":"builder","task":"Implement Step 3"}}`
-  and spawn/dispatch a sub-agent autonomously. Needs: recursion/depth limits to
-  prevent runaway spawning, a per-delegation step budget, and returning the
-  sub-agent's final answer as the tool result.
 - Persist agents (prompt + notes) across REPL sessions.

@@ -30,6 +30,7 @@ type Task struct {
 	Memory      memory.Memory
 	RAG         memory.RAG
 	Tools       tools.ToolRegistry
+	Label string
 }
 
 type Step struct {
@@ -69,7 +70,13 @@ type Engine struct {
 func (e *Engine) RunTask(ctx context.Context, task *Task) error {
 	task.Status = TaskRunning
 
+	label := task.Label
+	if label == "" {
+		label = "task"
+	}
+
 	for i := 0; i < MaxSteps; i++ {
+		fmt.Printf("  → %s thinking… (step %d)\n", label, len(task.Steps)+1)
 		step, err := e.Model.PlanNextStep(ctx, task)
 		if err != nil {
 			task.Status = TaskFailed
@@ -80,11 +87,15 @@ func (e *Engine) RunTask(ctx context.Context, task *Task) error {
 		step.StartedAt = time.Now()
 
 		if step.ToolCall != nil && step.ToolCall.Name != "" && step.ToolCall.Name != "none" {
-			// Detect repeated identical tool calls
-			if isRepeatToolCall(task.Steps, step.ToolCall) {
-				step.Result = "Stopped: same tool + args was already used."
-				step.ToolCall = nil // force stop
-				fmt.Println("  → Detected repeated tool call, stopping")
+			// Detect consecutive repeated identical tool calls
+			if isConsecutiveRepeat(task.Steps, step.ToolCall) {
+				// Block this step and let the model continue: the "Blocked:"
+				// plan is fed back to the model so it can pick a different
+				// action instead of ending the task early.
+				step.Plan = "Blocked: repeated the previous tool call (same tool + args); pick a different action"
+				step.Result = "Blocked: same tool + args as the previous step."
+				step.ToolCall = nil
+				fmt.Println("  → Detected consecutive repeated tool call, blocked")
 			} else {
 				tool, ok := task.Tools.Get(step.ToolCall.Name)
 				if !ok {
@@ -121,9 +132,10 @@ func (e *Engine) RunTask(ctx context.Context, task *Task) error {
 		task.Steps = append(task.Steps, step)
 
 		// A "Blocked:" plan means the model tried a disallowed/invalid tool
-		// call (e.g. wrong fs op, path not mentioned in task). Give the model
-		// another chance to pick a different action instead of ending the
-		// task early with no tool ever having run.
+		// call (e.g. wrong fs op, path not mentioned in task), or the engine
+		// blocked a consecutive repeat. Give the model another chance to pick
+		// a different action instead of ending the task early with no tool
+		// ever having run.
 		if strings.HasPrefix(step.Plan, "Blocked:") {
 			continue
 		}
@@ -146,32 +158,28 @@ func hasAgentTool(task *Task) bool {
 	return ok
 }
 
-// isRepeatToolCall returns true if the same tool+args was already used
-func isRepeatToolCall(steps []*Step, current *ToolCall) bool {
+// isConsecutiveRepeat reports whether current is identical to the most
+// recent executed tool call, i.e. the model asked for the same tool + args
+// twice in a row. Calls separated by a different tool call (e.g. re-reading
+// a file after delegating work) are not repeats and remain allowed.
+func isConsecutiveRepeat(steps []*Step, current *ToolCall) bool {
 	if current == nil {
 		return false
 	}
-	for _, s := range steps {
-		if s.ToolCall == nil {
+	for i := len(steps) - 1; i >= 0; i-- {
+		prev := steps[i].ToolCall
+		if prev == nil {
 			continue
 		}
-		if s.ToolCall.Name != current.Name {
-			continue
+		if prev.Name != current.Name || len(prev.Args) != len(current.Args) {
+			return false
 		}
-		// Compare args
-		if len(s.ToolCall.Args) != len(current.Args) {
-			continue
-		}
-		match := true
 		for k, v := range current.Args {
-			if s.ToolCall.Args[k] != v {
-				match = false
-				break
+			if prev.Args[k] != v {
+				return false
 			}
 		}
-		if match {
-			return true
-		}
+		return true
 	}
 	return false
 }
