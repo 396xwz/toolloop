@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -223,6 +224,32 @@ func printTopologyReport(report *topology.Report) {
 	}
 }
 
+// topologyExport emits the executed-graph export: to the -topology-report
+// file when set, and to the debug log when -debug is on.
+func topologyExport(file string, g *topology.Graph, report *topology.Report) {
+	if file == "" && !debugMode {
+		return
+	}
+	dot := topology.DOT(g, report)
+	mer := topology.Mermaid(g, report)
+	if file != "" {
+		content := dot
+		switch strings.ToLower(filepath.Ext(file)) {
+		case ".mmd", ".mermaid", ".md":
+			content = mer
+		}
+		if err := os.WriteFile(file, []byte(content), 0o644); err != nil {
+			log.Printf("writing topology report: %v", err)
+			return
+		}
+		fmt.Printf("topology report written to %s\n", file)
+	}
+	if debugMode {
+		debugf("[topology] exported graph (DOT):\n%s", dot)
+		debugf("[topology] exported graph (mermaid):\n%s", mer)
+	}
+}
+
 func main() {
 	var tasks stringSlice
 	flag.Var(&tasks, "task", "Task description (can be used multiple times)")
@@ -243,6 +270,7 @@ func main() {
 	// prompt file option to override default system prompt
 	promptFile := flag.String("prompt", "", "Prompt file to use as system prompt")
 	topologyPath := flag.String("topology", "", "Path to a topology graph (YAML); with -task, run the graph walk instead of the task loop")
+	topologyReportFile := flag.String("topology-report", "", "Write a DOT/mermaid export of the executed graph to this file (.mmd/.mermaid/.md selects mermaid; default DOT)")
 	debugFlag := flag.Bool("debug", false, "Enable debug logging")
 	flag.Parse()
 	debugMode = *debugFlag
@@ -266,7 +294,8 @@ Options:
   -backend llama.cpp|ollama
   -server <url>    llama.cpp server URL (default http://localhost:8080)
   -prompt <file>   Prompt file to use as system prompt
- -topology <file> YAML graph; with -task, run the graph walk
+  -topology <file> YAML graph; with -task, run the graph walk
+  -topology-report <file> Write a DOT/mermaid export of the executed graph (.mmd/.mermaid/.md selects mermaid)
   -agent <name>   Run -task as the named agent (roles from AGENTS.md)`)
 	}
 
@@ -397,15 +426,17 @@ Options:
 				debugf("[topology]   result: %s err=%v (%.2fs)", truncate(st.Result, 300), st.Err, dur)
 			}
 		}
-		report, runErr := topology.Run(ctx, graph, tasks[0], model, registry, mem, rag, builtinAgentPrompts, stepHook)
+		report, runErr := topology.Run(ctx, graph, tasks[0], model, registry, mem, rag, builtinAgentPrompts, nil, stepHook)
 		if runErr != nil {
 			if report != nil {
 				printTopologyReport(report)
+				topologyExport(*topologyReportFile, graph, report)
 			}
 			fmt.Printf("PIPELINE FAILED: %v\n", runErr)
 			os.Exit(1)
 		}
 		printTopologyReport(report)
+		topologyExport(*topologyReportFile, graph, report)
 		if report.Status == "ok" {
 			fmt.Println("PIPELINE SUCCESS")
 			os.Exit(0)

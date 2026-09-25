@@ -96,7 +96,7 @@ func TestRunLinearOK(t *testing.T) {
 	reg.Register("verdict", tools.VerdictTool{})
 	roles := map[string]string{"r1": "prompt-1", "r2": "prompt-2"}
 
-	report, err := Run(context.Background(), g, "task text", model, reg, nil, nil, roles)
+	report, err := Run(context.Background(), g, "task text", model, reg, nil, nil, roles, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestRunBranchOnFail(t *testing.T) {
 	reg.Register("verdict", tools.VerdictTool{})
 	roles := map[string]string{"r1": "p1", "r2": "p2", "r3": "p3"}
 
-	report, err := Run(context.Background(), g, "task", model, reg, nil, nil, roles)
+	report, err := Run(context.Background(), g, "task", model, reg, nil, nil, roles, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestRunMaxVisits(t *testing.T) {
 	reg.Register("verdict", tools.VerdictTool{})
 	roles := map[string]string{"r1": "p1", "r2": "p2"}
 
-	report, err := Run(context.Background(), g, "task", model, reg, nil, nil, roles)
+	report, err := Run(context.Background(), g, "task", model, reg, nil, nil, roles, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestRunMissingVerdict(t *testing.T) {
 	reg.Register("verdict", tools.VerdictTool{})
 	roles := map[string]string{"r1": "p1", "r2": "p2"}
 
-	report, err := Run(context.Background(), g, "task", model, reg, nil, nil, roles)
+	report, err := Run(context.Background(), g, "task", model, reg, nil, nil, roles, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -295,7 +295,7 @@ func TestRunErrorRoutesFailEdge(t *testing.T) {
 	reg.Register("verdict", tools.VerdictTool{})
 	roles := map[string]string{"r1": "p1", "r2": "p2", "r3": "p3"}
 
-	report, err := Run(context.Background(), g, "task", model, reg, nil, nil, roles)
+	report, err := Run(context.Background(), g, "task", model, reg, nil, nil, roles, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -313,5 +313,121 @@ func TestRunErrorRoutesFailEdge(t *testing.T) {
 	}
 	if report.Status != "ok" || report.Reason != "b done" {
 		t.Fatalf("status = %q reason = %q; want ok / b done", report.Status, report.Reason)
+	}
+}
+
+// confirmGraph builds a -> b -> done with node a confirm-gated.
+func confirmGraph() *Graph {
+	return &Graph{
+		Name:  "confirm-gated",
+		Entry: "a",
+		Nodes: []Node{
+			{ID: "a", Role: "r1", Tools: []string{}, Confirm: true},
+			{ID: "b", Role: "r2", Tools: []string{}},
+		},
+		Edges: []Edge{
+			{From: "a", To: "b", On: "always"},
+			{From: "b", To: Terminal, On: "always"},
+		},
+	}
+}
+
+// TestRunAgentToolForbidden: a node whose allowlist names the agent tool is
+// rejected even when the agent tool IS in the parent registry: the guard is
+// a protocol rule, not a registry lookup.
+func TestRunAgentToolForbidden(t *testing.T) {
+	g := &Graph{
+		Name:  "agent-forbidden",
+		Entry: "a",
+		Nodes: []Node{
+			{ID: "a", Role: "r1", Tools: []string{"agent"}},
+		},
+		Edges: []Edge{
+			{From: "a", To: Terminal, On: "always"},
+		},
+	}
+	model := &scriptModel{}
+	reg := testRegistry("agent")
+	reg.Register("verdict", tools.VerdictTool{})
+	roles := map[string]string{"r1": "p"}
+
+	report, err := Run(context.Background(), g, "task", model, reg, nil, nil, roles, nil)
+	if !errors.Is(err, ErrAgentToolForbidden) {
+		t.Fatalf("Run err = %v, want ErrAgentToolForbidden", err)
+	}
+	if report.Status != "fail" {
+		t.Fatalf("status = %q, want fail", report.Status)
+	}
+	if len(model.tasks) != 0 {
+		t.Fatalf("model saw %d tasks, want 0 (node must not run)", len(model.tasks))
+	}
+}
+
+// TestRunConfirmRequired: a confirm-gated node reached without a ConfirmFunc
+// (non-interactive walk) fails with ErrConfirmRequired before the node runs.
+func TestRunConfirmRequired(t *testing.T) {
+	g := confirmGraph()
+	model := &scriptModel{}
+	reg := testRegistry()
+	roles := map[string]string{"r1": "p1", "r2": "p2"}
+
+	report, err := Run(context.Background(), g, "task", model, reg, nil, nil, roles, nil)
+	if !errors.Is(err, ErrConfirmRequired) {
+		t.Fatalf("Run err = %v, want ErrConfirmRequired", err)
+	}
+	if report.Status != "fail" {
+		t.Fatalf("status = %q, want fail", report.Status)
+	}
+	if len(model.tasks) != 0 {
+		t.Fatalf("model saw %d tasks, want 0 (confirm node must not run)", len(model.tasks))
+	}
+}
+
+// TestRunConfirmDenied: the ConfirmFunc refuses; the walk fails with
+// ErrConfirmDenied and the node never runs.
+func TestRunConfirmDenied(t *testing.T) {
+	g := confirmGraph()
+	model := &scriptModel{}
+	reg := testRegistry()
+	roles := map[string]string{"r1": "p1", "r2": "p2"}
+	confirm := func(node Node) (bool, error) { return false, nil }
+
+	report, err := Run(context.Background(), g, "task", model, reg, nil, nil, roles, confirm)
+	if !errors.Is(err, ErrConfirmDenied) {
+		t.Fatalf("Run err = %v, want ErrConfirmDenied", err)
+	}
+	if report.Status != "fail" {
+		t.Fatalf("status = %q, want fail", report.Status)
+	}
+	if len(model.tasks) != 0 {
+		t.Fatalf("model saw %d tasks, want 0 (denied node must not run)", len(model.tasks))
+	}
+}
+
+// TestRunConfirmGranted: the ConfirmFunc grants; the gated node runs and the
+// walk completes normally.
+func TestRunConfirmGranted(t *testing.T) {
+	g := confirmGraph()
+	model := &scriptModel{script: []*engine.Step{
+		verdictStep("ok", "a done"),
+		verdictStep("ok", "b done"),
+	}}
+	reg := testRegistry()
+	reg.Register("verdict", tools.VerdictTool{})
+	roles := map[string]string{"r1": "p1", "r2": "p2"}
+	confirm := func(node Node) (bool, error) { return true, nil }
+
+	report, err := Run(context.Background(), g, "task", model, reg, nil, nil, roles, confirm)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if report.Status != "ok" {
+		t.Fatalf("status = %q, want ok (reason %q)", report.Status, report.Reason)
+	}
+	if len(report.Nodes) != 2 {
+		t.Fatalf("len(Nodes) = %d, want 2", len(report.Nodes))
+	}
+	if len(model.tasks) != 2 {
+		t.Fatalf("model saw %d tasks, want 2", len(model.tasks))
 	}
 }

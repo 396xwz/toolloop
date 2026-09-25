@@ -2,6 +2,7 @@ package topology
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -31,12 +32,28 @@ type Report struct {
 	Status string // "ok" | "fail"
 	Reason string
 	Nodes  []NodeReport // one entry per visit, in execution order (cycle ids repeat)
+	// ReachedTerminal is true when the walk's final transition went to the
+	// implicit terminal, so the exports can mark the last node's edge into
+	// it as taken. Early termination (max_visits, ctx cancel) leaves it
+	// false even if the last verdict would have matched a terminal edge.
+	ReachedTerminal bool
 }
 
 // StepHook is an optional per-node callback, invoked after the node's task
 // completes (success or failure), with the node id and the full step trace.
 // The CLI uses it to route -debug step detail through its debug logger.
 type StepHook func(nodeID string, steps []*engine.Step)
+
+// ConfirmFunc gates a Confirm node: called with the node before it runs;
+// (false, nil) denies the walk.
+type ConfirmFunc func(node Node) (bool, error)
+
+// Sentinel errors returned by Run before the offending node runs.
+var (
+	ErrAgentToolForbidden = errors.New("agent tool is forbidden in graph node allowlists")
+	ErrConfirmRequired    = errors.New("confirm-gated node reached in a non-interactive walk")
+	ErrConfirmDenied      = errors.New("confirmation denied")
+)
 
 // Run walks g starting from g.Entry, executing each node through
 // engine.Engine.RunTask and routing on verdicts until a terminal node, a
@@ -48,6 +65,11 @@ type StepHook func(nodeID string, steps []*engine.Step)
 // registry is the global tool registry; each node gets a filtered copy of
 // its allowlist plus the verdict tool (the graph protocol).
 //
+// confirm gates Confirm nodes: before a Confirm node runs, confirm is called
+// with the node; (false, nil) denies the walk with ErrConfirmDenied. A nil
+// confirm means the walk is non-interactive: confirm-gated nodes fail with
+// ErrConfirmRequired before they run.
+//
 // A node's run error (model/transport failure) is a node fail, not a Run
 // error. Run returns an error only for structural problems (unknown
 // role/tool, unknown node) or context cancellation, in which case the
@@ -55,7 +77,7 @@ type StepHook func(nodeID string, steps []*engine.Step)
 //
 // hooks, if any, are invoked after each node's task completes with the
 // node id and its step trace, for callers that log step-level detail.
-func Run(ctx context.Context, g *Graph, entryTask string, model engine.ChatModel, registry tools.ToolRegistry, mem memory.Memory, rag memory.RAG, roles map[string]string, hooks ...StepHook) (*Report, error) {
+func Run(ctx context.Context, g *Graph, entryTask string, model engine.ChatModel, registry tools.ToolRegistry, mem memory.Memory, rag memory.RAG, roles map[string]string, confirm ConfirmFunc, hooks ...StepHook) (*Report, error) {
 	prevPrompt := model.SystemPromptValue()
 	defer model.SetSystemPrompt(prevPrompt)
 
@@ -87,6 +109,18 @@ func Run(ctx context.Context, g *Graph, entryTask string, model engine.ChatModel
 			return nil, fmt.Errorf("graph %q: walk reached unknown node %q", g.Name, current)
 		}
 
+		// Protocol rule: the agent tool is never offered to graph nodes, even
+		// when present in the parent registry; delegation is an engine-level
+		// capability, not a node-level one.
+		for _, name := range node.Tools {
+			if name == "agent" {
+				report.Status = tools.VerdictFail
+				report.Reason = ErrAgentToolForbidden.Error()
+				report.Nodes = reports
+				return report, ErrAgentToolForbidden
+			}
+		}
+
 		// max_visits counts total visits per node id; the cap ends the
 		// walk as a normal terminal, not an error.
 		if g.MaxVisits > 0 && visits[node.ID] >= g.MaxVisits {
@@ -102,6 +136,31 @@ func Run(ctx context.Context, g *Graph, entryTask string, model engine.ChatModel
 			return nil, fmt.Errorf("graph %q: node %q has unknown role %q", g.Name, node.ID, node.Role)
 		}
 
+		// A Confirm node must be explicitly approved before it runs. A walk
+		// without a ConfirmFunc is non-interactive: confirm-gated nodes
+		// cannot be reached, so the walk fails before the node runs.
+		if node.Confirm {
+			if confirm == nil {
+				report.Status = tools.VerdictFail
+				report.Reason = ErrConfirmRequired.Error()
+				report.Nodes = reports
+				return report, ErrConfirmRequired
+			}
+			granted, cerr := confirm(node)
+			if cerr != nil {
+				report.Status = tools.VerdictFail
+				report.Reason = cerr.Error()
+				report.Nodes = reports
+				return report, cerr
+			}
+			if !granted {
+				report.Status = tools.VerdictFail
+				report.Reason = ErrConfirmDenied.Error()
+				report.Nodes = reports
+				return report, ErrConfirmDenied
+			}
+		}
+
 		nodeTools, err := nodeRegistry(registry, node)
 		if err != nil {
 			return nil, err
@@ -113,17 +172,17 @@ func Run(ctx context.Context, g *Graph, entryTask string, model engine.ChatModel
 		}
 
 		task := &engine.Task{
-			ID:          fmt.Sprintf("node-%s-%d", node.ID, visits[node.ID]),
-			Description: desc,
-			CreatedAt:   time.Now(),
-			Status:      engine.TaskPending,
-			Steps:       []*engine.Step{},
-			Memory:      mem,
-			RAG:         rag,
-			Tools:       nodeTools,
-			Label:       node.ID,
-		MaxSteps:       node.MaxSteps,
-		RequireVerdict: true,
+			ID:             fmt.Sprintf("node-%s-%d", node.ID, visits[node.ID]),
+			Description:    desc,
+			CreatedAt:      time.Now(),
+			Status:         engine.TaskPending,
+			Steps:          []*engine.Step{},
+			Memory:         mem,
+			RAG:            rag,
+			Tools:          nodeTools,
+			Label:          node.ID,
+			MaxSteps:       node.MaxSteps,
+			RequireVerdict: true,
 		}
 
 		model.SetSystemPrompt(prompt)
@@ -162,6 +221,7 @@ func Run(ctx context.Context, g *Graph, entryTask string, model engine.ChatModel
 		if !ok || next == Terminal {
 			report.Status = verdict.Status
 			report.Reason = verdict.Reason
+			report.ReachedTerminal = ok && next == Terminal
 			report.Nodes = reports
 			return report, nil
 		}
