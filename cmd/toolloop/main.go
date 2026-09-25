@@ -12,6 +12,7 @@ import (
 	"github.com/396xwz/toolloop/internal/engine"
 	"github.com/396xwz/toolloop/internal/memory"
 	"github.com/396xwz/toolloop/internal/tools"
+	"github.com/396xwz/toolloop/internal/topology"
 	"github.com/ollama/ollama/api"
 )
 
@@ -97,93 +98,78 @@ func runTasks(
 				continue
 			}
 		} else {
-		task := &engine.Task{
-			ID:          fmt.Sprintf("task-%d-%d", time.Now().Unix(), i),
-			Description: fullDescription,
-			CreatedAt:   time.Now(),
-			Status:      engine.TaskPending,
-			Steps:       []*engine.Step{},
-			Memory:      mem,
-			RAG:         rag,
-			Tools:       registry,
-			Label:       "main",
-		}
-		taskEngine := &engine.Engine{Model: model}
-		if err := taskEngine.RunTask(ctx, task); err != nil {
-			msg := fmt.Sprintf("Task failed: %v\n", err)
-			fmt.Print(msg)
-			if output != nil {
-				output.WriteString(msg)
+			task := &engine.Task{
+				ID:          fmt.Sprintf("task-%d-%d", time.Now().Unix(), i),
+				Description: fullDescription,
+				CreatedAt:   time.Now(),
+				Status:      engine.TaskPending,
+				Steps:       []*engine.Step{},
+				Memory:      mem,
+				RAG:         rag,
+				Tools:       registry,
+				Label:       "main",
 			}
-			continue
-		}
-		fmt.Printf("  → main thinking… (final answer)\n")
-		finalAnswer, err = model.GenerateFinalAnswer(ctx, task)
-		if err != nil {
-			finalAnswer = "Failed to generate final answer: " + err.Error()
-		}
-		// Debug output for final answer parsing
-		debugf("DEBUG: Final answer (raw):\n")
-		debugf("%s\n", finalAnswer)
-		if tn, args, perr := parseToolJSON(finalAnswer); perr == nil {
-			debugf("DEBUG: parseToolJSON -> tool=%s args=%v\n", tn, args)
-		} else {
-			debugf("DEBUG: parseToolJSON failed: %v\n", perr)
-		}
-		if fa, ok := forceFSArgsFromContent(finalAnswer); ok {
-			debugf("DEBUG: forceFSArgsFromContent -> %v\n", fa)
-		} else {
-			debugf("DEBUG: forceFSArgsFromContent -> no\n")
-		}
-		if ex, ok := extractFSCommandFromText(finalAnswer); ok {
-			debugf("DEBUG: extractFSCommandFromText -> %v\n", ex)
-		} else {
-			debugf("DEBUG: extractFSCommandFromText -> no\n")
-		}
-
-		// If the model returned a structured tool response only in the final answer (common with some models),
-		// try to parse it and execute the fs write if needed and not already performed during steps.
-		// This handles cases where the model emits: {"op":"write","path":"sample.go","content":"..."}
-		didExecute := false
-		// helper: check if task already ran an fs write for given path
-		alreadyWrote := func(path string) bool {
-			for _, s := range task.Steps {
-				if s.ToolCall == nil {
-					continue
+			taskEngine := &engine.Engine{Model: model}
+			if err := taskEngine.RunTask(ctx, task); err != nil {
+				msg := fmt.Sprintf("Task failed: %v\n", err)
+				fmt.Print(msg)
+				if output != nil {
+					output.WriteString(msg)
 				}
-				if s.ToolCall.Name != "fs" {
-					continue
-				}
-				if op, ok := s.ToolCall.Args["op"]; ok && op == "write" {
-					if p, ok := s.ToolCall.Args["path"]; ok && p == path {
-						return true
-					}
-				}
+				continue
 			}
-			return false
-		}
-
-		// Try structured JSON parse first
-		if tn, args, perr := parseToolJSON(finalAnswer); perr == nil && tn == "fs" {
-			args = normalizeFSArgs(args)
-			if args["op"] == "write" && args["path"] != "" && !alreadyWrote(args["path"]) {
-				if tool, ok := registry.Get("fs"); ok {
-					if res, err := tool.Execute(ctx, args); err != nil {
-						finalAnswer = finalAnswer + "\n\n[fs execution failed: " + err.Error() + "]"
-					} else {
-						finalAnswer = finalAnswer + "\n\n[fs executed: " + res + "]"
-					}
-					didExecute = true
-				}
+			fmt.Printf("  → main thinking… (final answer)\n")
+			finalAnswer, err = model.GenerateFinalAnswer(ctx, task)
+			if err != nil {
+				finalAnswer = "Failed to generate final answer: " + err.Error()
 			}
-		}
-
-		// If not executed yet, try the forced bare-JSON/content parser
-		if !didExecute {
+			// Debug output for final answer parsing
+			debugf("DEBUG: Final answer (raw):\n")
+			debugf("%s\n", finalAnswer)
+			if tn, args, perr := parseToolJSON(finalAnswer); perr == nil {
+				debugf("DEBUG: parseToolJSON -> tool=%s args=%v\n", tn, args)
+			} else {
+				debugf("DEBUG: parseToolJSON failed: %v\n", perr)
+			}
 			if fa, ok := forceFSArgsFromContent(finalAnswer); ok {
-				if fa["op"] == "write" && fa["path"] != "" && !alreadyWrote(fa["path"]) {
+				debugf("DEBUG: forceFSArgsFromContent -> %v\n", fa)
+			} else {
+				debugf("DEBUG: forceFSArgsFromContent -> no\n")
+			}
+			if ex, ok := extractFSCommandFromText(finalAnswer); ok {
+				debugf("DEBUG: extractFSCommandFromText -> %v\n", ex)
+			} else {
+				debugf("DEBUG: extractFSCommandFromText -> no\n")
+			}
+
+			// If the model returned a structured tool response only in the final answer (common with some models),
+			// try to parse it and execute the fs write if needed and not already performed during steps.
+			// This handles cases where the model emits: {"op":"write","path":"sample.go","content":"..."}
+			didExecute := false
+			// helper: check if task already ran an fs write for given path
+			alreadyWrote := func(path string) bool {
+				for _, s := range task.Steps {
+					if s.ToolCall == nil {
+						continue
+					}
+					if s.ToolCall.Name != "fs" {
+						continue
+					}
+					if op, ok := s.ToolCall.Args["op"]; ok && op == "write" {
+						if p, ok := s.ToolCall.Args["path"]; ok && p == path {
+							return true
+						}
+					}
+				}
+				return false
+			}
+
+			// Try structured JSON parse first
+			if tn, args, perr := parseToolJSON(finalAnswer); perr == nil && tn == "fs" {
+				args = normalizeFSArgs(args)
+				if args["op"] == "write" && args["path"] != "" && !alreadyWrote(args["path"]) {
 					if tool, ok := registry.Get("fs"); ok {
-						if res, err := tool.Execute(ctx, fa); err != nil {
+						if res, err := tool.Execute(ctx, args); err != nil {
 							finalAnswer = finalAnswer + "\n\n[fs execution failed: " + err.Error() + "]"
 						} else {
 							finalAnswer = finalAnswer + "\n\n[fs executed: " + res + "]"
@@ -192,11 +178,26 @@ func runTasks(
 					}
 				}
 			}
-		}
 
-		if mem != nil {
-			_ = mem.Save(ctx, task.ID, "task_result", finalAnswer)
-		}
+			// If not executed yet, try the forced bare-JSON/content parser
+			if !didExecute {
+				if fa, ok := forceFSArgsFromContent(finalAnswer); ok {
+					if fa["op"] == "write" && fa["path"] != "" && !alreadyWrote(fa["path"]) {
+						if tool, ok := registry.Get("fs"); ok {
+							if res, err := tool.Execute(ctx, fa); err != nil {
+								finalAnswer = finalAnswer + "\n\n[fs execution failed: " + err.Error() + "]"
+							} else {
+								finalAnswer = finalAnswer + "\n\n[fs executed: " + res + "]"
+							}
+							didExecute = true
+						}
+					}
+				}
+			}
+
+			if mem != nil {
+				_ = mem.Save(ctx, task.ID, "task_result", finalAnswer)
+			}
 		}
 		fmt.Println("Task completed.")
 		fmt.Println("Final Answer:")
@@ -209,6 +210,18 @@ func runTasks(
 }
 
 // ─── MAIN ───────────────────────────────────────────────────────────
+
+// printTopologyReport renders the maf-pipeline style printout: one line per
+// executed node visit, in execution order (cycle node ids repeat).
+func printTopologyReport(report *topology.Report) {
+	for _, n := range report.Nodes {
+		dur := 0.0
+		if !n.StartedAt.IsZero() {
+			dur = n.FinishedAt.Sub(n.StartedAt).Seconds()
+		}
+		fmt.Printf("[%s] verdict=%s steps=%d %.1fs\n", n.ID, n.Verdict, n.Steps, dur)
+	}
+}
 
 func main() {
 	var tasks stringSlice
@@ -229,18 +242,20 @@ func main() {
 	agentName := flag.String("agent", "", "Run -task as the named agent (role from AGENTS.md or built-in roles)")
 	// prompt file option to override default system prompt
 	promptFile := flag.String("prompt", "", "Prompt file to use as system prompt")
+	topologyPath := flag.String("topology", "", "Path to a topology graph (YAML); with -task, run the graph walk instead of the task loop")
 	debugFlag := flag.Bool("debug", false, "Enable debug logging")
 	flag.Parse()
 	debugMode = *debugFlag
 
 	hasDirectAction := *webQuery != "" || *browserAction != "" || *scrapeURL != "" || *fsOp != "" || *shellCmd != ""
-	if len(tasks) == 0 && *indexPath == "" && !*replMode && !hasDirectAction {
+	if len(tasks) == 0 && *indexPath == "" && !*replMode && !hasDirectAction && *topologyPath == "" {
 		log.Fatal(`Usage:
   go run ./cmd/toolloop -repl
   go run ./cmd/toolloop -task "..."
   go run ./cmd/toolloop -agent orchestrator -task "..."
   go run ./cmd/toolloop -index documents
   go run ./cmd/toolloop -backend ollama -model qwen2.5:14b -task "..."
+go run ./cmd/toolloop -topology pipeline.yaml -task "Build the report"
   go run ./cmd/toolloop -scrape "https://example.com" -scrape-output sports.md
 
 Notes:
@@ -251,6 +266,7 @@ Options:
   -backend llama.cpp|ollama
   -server <url>    llama.cpp server URL (default http://localhost:8080)
   -prompt <file>   Prompt file to use as system prompt
+ -topology <file> YAML graph; with -task, run the graph walk
   -agent <name>   Run -task as the named agent (roles from AGENTS.md)`)
 	}
 
@@ -339,10 +355,68 @@ Options:
 	registry.Register("fs", tools.FileSystemTool{})
 	registry.Register("shell", tools.ShellTool{})
 	registry.Register("python", tools.PythonTool{})
+	registry.Register("verdict", tools.VerdictTool{})
 
 	if *replMode {
 		runREPL(ctx, model, registry, mem, rag)
 		return
+	}
+
+	// -topology: run the entry task as a graph walk instead of the task loop.
+	if *topologyPath != "" {
+		if len(tasks) != 1 {
+			log.Fatalf("-topology requires exactly one -task (got %d)", len(tasks))
+		}
+		loadAgentsMarkdown()
+		graph, err := topology.Load(*topologyPath)
+		if err != nil {
+			log.Fatalf("loading topology: %v", err)
+		}
+		if err := graph.ValidateRoles(builtinRoleNames()); err != nil {
+			log.Fatalf("validating topology: %v", err)
+		}
+		if err := graph.ValidateTools(registry.Names()); err != nil {
+			log.Fatalf("validating topology: %v", err)
+		}
+		stepHook := func(nodeID string, steps []*engine.Step) {
+			if !debugMode {
+				return
+			}
+			for _, st := range steps {
+				dur := 0.0
+				if !st.StartedAt.IsZero() {
+					dur = st.FinishedAt.Sub(st.StartedAt).Seconds()
+				}
+				debugf("[topology] node=%s step=%d", nodeID, st.Index)
+				if st.Plan != "" {
+					debugf("[topology]   plan: %s", truncate(st.Plan, 200))
+				}
+				if st.ToolCall != nil {
+					debugf("[topology]   tool: %s args=%v output=%s", st.ToolCall.Name, st.ToolCall.Args, truncate(st.ToolCall.Output, 300))
+				}
+				debugf("[topology]   result: %s err=%v (%.2fs)", truncate(st.Result, 300), st.Err, dur)
+			}
+		}
+		report, runErr := topology.Run(ctx, graph, tasks[0], model, registry, mem, rag, builtinAgentPrompts, stepHook)
+		if runErr != nil {
+			if report != nil {
+				printTopologyReport(report)
+			}
+			fmt.Printf("PIPELINE FAILED: %v\n", runErr)
+			os.Exit(1)
+		}
+		printTopologyReport(report)
+		if report.Status == "ok" {
+			fmt.Println("PIPELINE SUCCESS")
+			os.Exit(0)
+		}
+		if len(report.Nodes) > 0 {
+			last := report.Nodes[len(report.Nodes)-1]
+			fmt.Printf("PIPELINE FAILED: %s: %s\n", last.ID, report.Reason)
+		} else {
+			fmt.Printf("PIPELINE FAILED: %s\n", report.Reason)
+		}
+		os.Exit(1)
 	}
 
 	// -agent: run -task under the named agent's system prompt, the same

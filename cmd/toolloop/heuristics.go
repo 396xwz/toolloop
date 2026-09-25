@@ -408,6 +408,15 @@ const agentToolInstructions = `7. agent - delegate a task to a named agent (e.g.
    Do work yourself only when no role fits the task: a single fs read, one shell command, a quick lookup, or answering from context.
    Example (delegate, not shell): {"tool":"agent","args":{"name":"tester","task":"Run go test ./cmd/toolloop/... and report pass/fail"}}`
 
+// verdictToolInstructions is appended to the tool list when the verdict tool
+// is registered, telling the model to close every task with a final status.
+// It is unnumbered because the agent tool (REPL mode) occupies item 7.
+const verdictToolInstructions = `verdict - close the task with a final status; always make this your final tool call
+ args:
+ - status (required): "ok" if the task is complete, "fail" if it could not be completed.
+ - reason (optional): a short explanation of the outcome.
+ An invalid status is rejected and the task continues; status must be exactly "ok" or "fail".`
+
 // toolCallProtocol is the JSON reply protocol appended after the tool list.
 const toolCallProtocol = `To call a tool, reply with ONLY a single JSON object, no prose, no markdown fences:
 {"tool":"fs","args":{"op":"read","path":"README.md"}}
@@ -421,12 +430,15 @@ Rules:
 - If no tool is needed, reply with a short plain-text note instead (no JSON).`
 
 // toolInstructionsFor builds the model-facing tool instructions from what the
-// task's registry actually contains: the static tools 1-6 plus the agent tool
-// when it is registered (REPL mode).
+// task's registry actually contains: the static tools 1-6, the agent tool
+// when it is registered (REPL mode), and the verdict tool when it is.
 func toolInstructionsFor(reg tools.ToolRegistry) string {
 	s := toolInstructions
 	if _, ok := reg.Get("agent"); ok {
 		s += agentToolInstructions
+	}
+	if _, ok := reg.Get("verdict"); ok {
+		s += verdictToolInstructions
 	}
 	return s + toolCallProtocol
 }

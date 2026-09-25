@@ -1,0 +1,25 @@
+name: build_test
+entry: build 
+max_visits: 4
+nodes:
+  - id: build
+    role: builder
+    tools: [fs, shell, verdict]
+    max_steps: 12 
+  - id: test
+    role: tester
+    tools: [fs, shell, verdict]
+    max_steps: 6
+edges:
+  - from: build 
+    to: test 
+    on: ok
+  - from: build 
+    to: done
+    on: fail
+  - from: test 
+    to: build 
+    on: fail
+  - from: test 
+    to: done
+    on: ok

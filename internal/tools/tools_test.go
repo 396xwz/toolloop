@@ -10,6 +10,34 @@ import (
 	"testing"
 )
 
+type namedTool struct {
+	name string
+}
+
+func (t namedTool) Name() string { return t.name }
+
+func (t namedTool) Execute(ctx context.Context, args map[string]string) (string, error) {
+	return "", nil
+}
+
+func TestToolRegistryNames(t *testing.T) {
+	reg := NewToolRegistry()
+	reg.Register("c", namedTool{name: "c"})
+	reg.Register("a", namedTool{name: "a"})
+	reg.Register("b", namedTool{name: "b"})
+
+	got := reg.Names()
+	want := []string{"a", "b", "c"}
+	if len(got) != len(want) {
+		t.Fatalf("Names() mismatch\ngot:  %v\nwant: %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Names() mismatch\ngot:  %v\nwant: %v", got, want)
+		}
+	}
+}
+
 func TestFileSystemEditReplacesUniqueSnippetAndReturnsDiff(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sample.txt")
 	original := "alpha\nbeta\ncharlie\n"

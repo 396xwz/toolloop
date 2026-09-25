@@ -257,10 +257,10 @@ func TestFsWriteContinuesWhenAgentToolAvailable(t *testing.T) {
 	registry.Register("agent", resultTool{name: "agent", out: "tests pass"})
 
 	task := &engine.Task{
-		ID:      "t-fs",
-		Status:  engine.TaskPending,
-		Steps:   []*engine.Step{},
-		Tools:   registry,
+		ID:     "t-fs",
+		Status: engine.TaskPending,
+		Steps:  []*engine.Step{},
+		Tools:  registry,
 	}
 	if err := (&engine.Engine{Model: model}).RunTask(context.Background(), task); err != nil {
 		t.Fatalf("RunTask: %v", err)
@@ -291,10 +291,10 @@ func TestFsWriteCompletesWithoutAgentTool(t *testing.T) {
 	registry.Register("shell", resultTool{name: "shell", out: "ok"})
 
 	task := &engine.Task{
-		ID:      "t-batch",
-		Status:  engine.TaskPending,
-		Steps:   []*engine.Step{},
-		Tools:   registry,
+		ID:     "t-batch",
+		Status: engine.TaskPending,
+		Steps:  []*engine.Step{},
+		Tools:  registry,
 	}
 	if err := (&engine.Engine{Model: model}).RunTask(context.Background(), task); err != nil {
 		t.Fatalf("RunTask: %v", err)

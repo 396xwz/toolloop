@@ -1,0 +1,15 @@
+name: smoke
+entry: build
+max_visits: 3
+nodes:
+  - id: build
+    role: builder
+    tools: [fs, verdict]
+    max_steps: 4
+edges:
+  - from: build
+    to: done
+    on: ok
+  - from: build
+    to: done
+    on: fail

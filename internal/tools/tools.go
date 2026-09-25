@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -38,6 +39,17 @@ func (r *ToolRegistry) Register(name string, t Tool) {
 func (r *ToolRegistry) Get(name string) (Tool, bool) {
 	t, ok := r.tools[name]
 	return t, ok
+}
+
+// Names returns the registered tool names in sorted order.
+// Deterministic enumeration used to build per-node tool registries.
+func (r *ToolRegistry) Names() []string {
+	names := make([]string, 0, len(r.tools))
+	for name := range r.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 //

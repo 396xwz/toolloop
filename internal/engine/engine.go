@@ -30,13 +30,20 @@ type Task struct {
 	Memory      memory.Memory
 	RAG         memory.RAG
 	Tools       tools.ToolRegistry
-	Label string
+	Verdict     *tools.Verdict
+	Label       string
+	MaxSteps    int
+	// RequireVerdict suppresses the fs-write-completes-task shortcut: the
+	// task closes only on a verdict call or step exhaustion. The topology
+	// runner sets it, since graph nodes report via verdict.
+	RequireVerdict bool
 }
 
 type Step struct {
 	Index      int
 	Plan       string
 	ToolCall   *ToolCall
+	Verdict    *tools.Verdict
 	Result     string
 	StartedAt  time.Time
 	FinishedAt time.Time
@@ -69,13 +76,17 @@ type Engine struct {
 
 func (e *Engine) RunTask(ctx context.Context, task *Task) error {
 	task.Status = TaskRunning
+	maxSteps := MaxSteps
+	if task.MaxSteps > 0 {
+		maxSteps = task.MaxSteps
+	}
 
 	label := task.Label
 	if label == "" {
 		label = "task"
 	}
 
-	for i := 0; i < MaxSteps; i++ {
+	for i := 0; i < maxSteps; i++ {
 		fmt.Printf("  → %s thinking… (step %d)\n", label, len(task.Steps)+1)
 		step, err := e.Model.PlanNextStep(ctx, task)
 		if err != nil {
@@ -113,7 +124,7 @@ func (e *Engine) RunTask(ctx context.Context, task *Task) error {
 					// is available, the write is usually one step of a larger
 					// delegated workflow (e.g. the orchestrator writing plan.md
 					// before handing off to sub-agents).
-					if err == nil && step.ToolCall.Name == "fs" && !hasAgentTool(task) {
+					if err == nil && step.ToolCall.Name == "fs" && !task.RequireVerdict && !hasAgentTool(task) {
 						if op, ok := step.ToolCall.Args["op"]; ok && op == "write" {
 							step.FinishedAt = time.Now()
 							task.Steps = append(task.Steps, step)
@@ -130,6 +141,18 @@ func (e *Engine) RunTask(ctx context.Context, task *Task) error {
 
 		step.FinishedAt = time.Now()
 		task.Steps = append(task.Steps, step)
+
+		// A successful verdict call closes the task: record the verdict on the
+		// step and the task, then stop. A rejected verdict (invalid status) is
+		// not terminal so the model can retry.
+		if step.ToolCall != nil && step.ToolCall.Name == "verdict" && step.Err == nil {
+			v, _ := tools.ParseVerdict(step.ToolCall.Args)
+			step.Verdict = &v
+			task.Verdict = &v
+			task.Status = TaskCompleted
+			fmt.Printf(" -> verdict recorded (%s); marking task completed\n", v.Status)
+			return nil
+		}
 
 		// A "Blocked:" plan means the model tried a disallowed/invalid tool
 		// call (e.g. wrong fs op, path not mentioned in task), or the engine
@@ -148,7 +171,8 @@ func (e *Engine) RunTask(ctx context.Context, task *Task) error {
 	}
 
 	task.Status = TaskFailed
-	return fmt.Errorf("reached max steps (%d)", MaxSteps)
+	task.Verdict = &tools.Verdict{Status: tools.VerdictFail, Reason: "reached max steps", Implicit: true}
+	return fmt.Errorf("reached max steps (%d)", maxSteps)
 }
 
 // hasAgentTool reports whether the task's registry offers the agent
