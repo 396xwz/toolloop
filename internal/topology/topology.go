@@ -10,6 +10,12 @@
 // Load performs only structural validation. Role and tool names are
 // runtime-dependent, so they are validated by ValidateRoles and ValidateTools
 // once the CLI/runner knows what is loaded.
+//
+// Safety: a node's tool scope limits which nodes can obtain which tools —
+// never the agent tool — but it does not limit what a tool can do; a
+// shell-scoped node is an unattended shell. A confirm: true node is gated
+// interactively (Enter approves, any other input denies) and fails the walk
+// in non-interactive runs.
 package topology
 
 import (

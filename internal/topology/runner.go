@@ -141,10 +141,11 @@ func Run(ctx context.Context, g *Graph, entryTask string, model engine.ChatModel
 		// cannot be reached, so the walk fails before the node runs.
 		if node.Confirm {
 			if confirm == nil {
+				err := fmt.Errorf("node %q requires confirmation (non-interactive): %w", node.ID, ErrConfirmRequired)
 				report.Status = tools.VerdictFail
-				report.Reason = ErrConfirmRequired.Error()
+				report.Reason = err.Error()
 				report.Nodes = reports
-				return report, ErrConfirmRequired
+				return report, err
 			}
 			granted, cerr := confirm(node)
 			if cerr != nil {

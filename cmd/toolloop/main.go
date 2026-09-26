@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -211,6 +213,24 @@ func runTasks(
 }
 
 // ─── MAIN ───────────────────────────────────────────────────────────
+
+// confirmDecision reads one line of input and approves only an empty line
+// with no read error: Enter confirms, anything else (or EOF) denies.
+func confirmDecision(r io.Reader) bool {
+	line, err := bufio.NewReader(r).ReadString('\n')
+	return err == nil && strings.TrimSpace(line) == ""
+}
+
+// stdinIsTerminal reports whether stdin is an interactive terminal: a char
+// device (rules out pipes/files) that also passes the platform TTY check in
+// stdinIsTTY (rules out /dev/null and other non-terminal char devices).
+func stdinIsTerminal() bool {
+	st, err := os.Stdin.Stat()
+	if err != nil || st.Mode()&os.ModeCharDevice == 0 {
+		return false
+	}
+	return stdinIsTTY()
+}
 
 // printTopologyReport renders the maf-pipeline style printout: one line per
 // executed node visit, in execution order (cycle node ids repeat).
@@ -426,7 +446,16 @@ Options:
 				debugf("[topology]   result: %s err=%v (%.2fs)", truncate(st.Result, 300), st.Err, dur)
 			}
 		}
-		report, runErr := topology.Run(ctx, graph, tasks[0], model, registry, mem, rag, builtinAgentPrompts, nil, stepHook)
+		// Confirm-gated nodes are approvable only on an interactive TTY:
+		// Enter approves, any other input or EOF denies.
+		var confirmFn topology.ConfirmFunc
+		if stdinIsTerminal() {
+			confirmFn = func(n topology.Node) (bool, error) {
+				fmt.Printf("node %s (role %s) requires confirmation — press Enter to run, any other input to deny: ", n.ID, n.Role)
+				return confirmDecision(os.Stdin), nil
+			}
+		}
+		report, runErr := topology.Run(ctx, graph, tasks[0], model, registry, mem, rag, builtinAgentPrompts, confirmFn, stepHook)
 		if runErr != nil {
 			if report != nil {
 				printTopologyReport(report)
