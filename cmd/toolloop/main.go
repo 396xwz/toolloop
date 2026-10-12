@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -13,6 +14,8 @@ import (
 	"time"
 
 	"github.com/396xwz/toolloop/internal/engine"
+	"github.com/396xwz/toolloop/internal/eval"
+	"github.com/396xwz/toolloop/internal/eval/suites"
 	"github.com/396xwz/toolloop/internal/memory"
 	"github.com/396xwz/toolloop/internal/tools"
 	"github.com/396xwz/toolloop/internal/topology"
@@ -62,6 +65,123 @@ func (s *stringSlice) Set(value string) error {
 	return nil
 }
 
+func executeNormalTask(
+	ctx context.Context,
+	model engine.ChatModel,
+	registry tools.ToolRegistry,
+	description string,
+	id string,
+	label string,
+	mem memory.Memory,
+	rag memory.RAG,
+) normalTaskExecution {
+	ctx, usageCollector := withTokenUsageCollector(ctx)
+	task := &engine.Task{
+		ID:          id,
+		Description: description,
+		CreatedAt:   time.Now(),
+		Status:      engine.TaskPending,
+		Steps:       []*engine.Step{},
+		Memory:      mem,
+		RAG:         rag,
+		Tools:       registry,
+		Label:       label,
+	}
+	if err := (&engine.Engine{Model: model}).RunTask(ctx, task); err != nil {
+		return normalTaskExecution{Task: task, Tokens: usageCollector.snapshot(), Err: err}
+	}
+
+	fmt.Printf("  → %s thinking… (final answer)\n", label)
+	finalAnswer, finalErr := model.GenerateFinalAnswer(ctx, task)
+	if finalErr != nil {
+		finalAnswer = "Failed to generate final answer: " + finalErr.Error()
+	}
+	debugf("DEBUG: Final answer (raw):\n")
+	debugf("%s\n", finalAnswer)
+	if tn, args, perr := parseToolJSON(finalAnswer); perr == nil {
+		debugf("DEBUG: parseToolJSON -> tool=%s args=%v\n", tn, args)
+	} else {
+		debugf("DEBUG: parseToolJSON failed: %v\n", perr)
+	}
+	if fa, ok := forceFSArgsFromContent(finalAnswer); ok {
+		debugf("DEBUG: forceFSArgsFromContent -> %v\n", fa)
+	} else {
+		debugf("DEBUG: forceFSArgsFromContent -> no\n")
+	}
+	if ex, ok := extractFSCommandFromText(finalAnswer); ok {
+		debugf("DEBUG: extractFSCommandFromText -> %v\n", ex)
+	} else {
+		debugf("DEBUG: extractFSCommandFromText -> no\n")
+	}
+
+	alreadyWrote := func(path string) bool {
+		for _, step := range task.Steps {
+			if step.ToolCall != nil && step.ToolCall.Name == "fs" &&
+				step.ToolCall.Args["op"] == "write" && step.ToolCall.Args["path"] == path {
+				return true
+			}
+		}
+		return false
+	}
+	var fallbackErr error
+	var extraToolCalls []eval.ToolCallRecord
+	didExecute := false
+	if toolName, args, parseErr := parseToolJSON(finalAnswer); parseErr == nil && toolName == "fs" {
+		args = normalizeFSArgs(args)
+		if args["op"] == "write" && args["path"] != "" && !alreadyWrote(args["path"]) {
+			if tool, ok := registry.Get("fs"); ok {
+				start := time.Now()
+				if result, err := tool.Execute(ctx, args); err != nil {
+					fallbackErr = err
+					finalAnswer += "\n\n[fs execution failed: " + err.Error() + "]"
+				} else {
+					finalAnswer += "\n\n[fs executed: " + result + "]"
+				}
+				extraToolCalls = append(extraToolCalls, evaluationToolCall(toolName, args, time.Since(start), fallbackErr))
+				didExecute = true
+			}
+		}
+	}
+	if !didExecute {
+		if args, ok := forceFSArgsFromContent(finalAnswer); ok &&
+			args["op"] == "write" && args["path"] != "" && !alreadyWrote(args["path"]) {
+			if tool, found := registry.Get("fs"); found {
+				start := time.Now()
+				if result, err := tool.Execute(ctx, args); err != nil {
+					fallbackErr = err
+					finalAnswer += "\n\n[fs execution failed: " + err.Error() + "]"
+				} else {
+					finalAnswer += "\n\n[fs executed: " + result + "]"
+				}
+				extraToolCalls = append(extraToolCalls, evaluationToolCall("fs", args, time.Since(start), fallbackErr))
+			}
+		}
+	}
+	if mem != nil {
+		_ = mem.Save(ctx, task.ID, "task_result", finalAnswer)
+	}
+	return normalTaskExecution{
+		Output:         finalAnswer,
+		Task:           task,
+		ExtraToolCalls: extraToolCalls,
+		Tokens:         usageCollector.snapshot(),
+		Err:            errors.Join(finalErr, fallbackErr),
+	}
+}
+
+func evaluationToolCall(name string, args map[string]string, duration time.Duration, err error) eval.ToolCallRecord {
+	recordArgs := make(map[string]any, len(args))
+	for key, value := range args {
+		recordArgs[key] = value
+	}
+	return eval.ToolCallRecord{
+		Tool:     name,
+		Args:     recordArgs,
+		Duration: duration,
+		Err:      err,
+	}
+}
+
 func runTasks(
 	ctx context.Context,
 	model engine.ChatModel,
@@ -101,105 +221,24 @@ func runTasks(
 				continue
 			}
 		} else {
-			task := &engine.Task{
-				ID:          fmt.Sprintf("task-%d-%d", time.Now().Unix(), i),
-				Description: fullDescription,
-				CreatedAt:   time.Now(),
-				Status:      engine.TaskPending,
-				Steps:       []*engine.Step{},
-				Memory:      mem,
-				RAG:         rag,
-				Tools:       registry,
-				Label:       "main",
-			}
-			taskEngine := &engine.Engine{Model: model}
-			if err := taskEngine.RunTask(ctx, task); err != nil {
-				msg := fmt.Sprintf("Task failed: %v\n", err)
+			execution := executeNormalTask(
+				ctx,
+				model,
+				registry,
+				fullDescription,
+				fmt.Sprintf("task-%d-%d", time.Now().Unix(), i),
+				"main",
+				mem,
+				rag,
+			)
+			finalAnswer = execution.Output
+			if execution.Err != nil && execution.Task.Status == engine.TaskFailed {
+				msg := fmt.Sprintf("Task failed: %v\n", execution.Err)
 				fmt.Print(msg)
 				if output != nil {
 					output.WriteString(msg)
 				}
 				continue
-			}
-			fmt.Printf("  → main thinking… (final answer)\n")
-			finalAnswer, err = model.GenerateFinalAnswer(ctx, task)
-			if err != nil {
-				finalAnswer = "Failed to generate final answer: " + err.Error()
-			}
-			// Debug output for final answer parsing
-			debugf("DEBUG: Final answer (raw):\n")
-			debugf("%s\n", finalAnswer)
-			if tn, args, perr := parseToolJSON(finalAnswer); perr == nil {
-				debugf("DEBUG: parseToolJSON -> tool=%s args=%v\n", tn, args)
-			} else {
-				debugf("DEBUG: parseToolJSON failed: %v\n", perr)
-			}
-			if fa, ok := forceFSArgsFromContent(finalAnswer); ok {
-				debugf("DEBUG: forceFSArgsFromContent -> %v\n", fa)
-			} else {
-				debugf("DEBUG: forceFSArgsFromContent -> no\n")
-			}
-			if ex, ok := extractFSCommandFromText(finalAnswer); ok {
-				debugf("DEBUG: extractFSCommandFromText -> %v\n", ex)
-			} else {
-				debugf("DEBUG: extractFSCommandFromText -> no\n")
-			}
-
-			// If the model returned a structured tool response only in the final answer (common with some models),
-			// try to parse it and execute the fs write if needed and not already performed during steps.
-			// This handles cases where the model emits: {"op":"write","path":"sample.go","content":"..."}
-			didExecute := false
-			// helper: check if task already ran an fs write for given path
-			alreadyWrote := func(path string) bool {
-				for _, s := range task.Steps {
-					if s.ToolCall == nil {
-						continue
-					}
-					if s.ToolCall.Name != "fs" {
-						continue
-					}
-					if op, ok := s.ToolCall.Args["op"]; ok && op == "write" {
-						if p, ok := s.ToolCall.Args["path"]; ok && p == path {
-							return true
-						}
-					}
-				}
-				return false
-			}
-
-			// Try structured JSON parse first
-			if tn, args, perr := parseToolJSON(finalAnswer); perr == nil && tn == "fs" {
-				args = normalizeFSArgs(args)
-				if args["op"] == "write" && args["path"] != "" && !alreadyWrote(args["path"]) {
-					if tool, ok := registry.Get("fs"); ok {
-						if res, err := tool.Execute(ctx, args); err != nil {
-							finalAnswer = finalAnswer + "\n\n[fs execution failed: " + err.Error() + "]"
-						} else {
-							finalAnswer = finalAnswer + "\n\n[fs executed: " + res + "]"
-						}
-						didExecute = true
-					}
-				}
-			}
-
-			// If not executed yet, try the forced bare-JSON/content parser
-			if !didExecute {
-				if fa, ok := forceFSArgsFromContent(finalAnswer); ok {
-					if fa["op"] == "write" && fa["path"] != "" && !alreadyWrote(fa["path"]) {
-						if tool, ok := registry.Get("fs"); ok {
-							if res, err := tool.Execute(ctx, fa); err != nil {
-								finalAnswer = finalAnswer + "\n\n[fs execution failed: " + err.Error() + "]"
-							} else {
-								finalAnswer = finalAnswer + "\n\n[fs executed: " + res + "]"
-							}
-							didExecute = true
-						}
-					}
-				}
-			}
-
-			if mem != nil {
-				_ = mem.Save(ctx, task.ID, "task_result", finalAnswer)
 			}
 		}
 		fmt.Println("Task completed.")
@@ -291,17 +330,36 @@ func main() {
 	promptFile := flag.String("prompt", "", "Prompt file to use as system prompt")
 	topologyPath := flag.String("topology", "", "Path to a topology graph (YAML); with -task, run the graph walk instead of the task loop")
 	topologyReportFile := flag.String("topology-report", "", "Write a DOT/mermaid export of the executed graph to this file (.mmd/.mermaid/.md selects mermaid; default DOT)")
+	evalSuite := flag.String("eval", "", "Run an evaluation suite (available: fs-tool, model-backend, task)")
+	evalOutput := flag.String("eval-output", "", "Directory for evaluation reports (default eval-results; requires -eval)")
 	debugFlag := flag.Bool("debug", false, "Enable debug logging")
 	flag.Parse()
 	debugMode = *debugFlag
 
 	hasDirectAction := *webQuery != "" || *browserAction != "" || *scrapeURL != "" || *fsOp != "" || *shellCmd != ""
-	if len(tasks) == 0 && *indexPath == "" && !*replMode && !hasDirectAction && *topologyPath == "" {
+	if err := validateEvaluationMode(evaluationModeOptions{
+		Suite:          *evalSuite,
+		OutputDir:      *evalOutput,
+		Tasks:          tasks,
+		IndexPath:      *indexPath,
+		REPL:           *replMode,
+		AgentName:      *agentName,
+		TopologyPath:   *topologyPath,
+		TopologyReport: *topologyReportFile,
+		DirectAction:   hasDirectAction,
+		OutputFile:     *outputFile,
+	}); err != nil {
+		log.Fatal(err)
+	}
+	if len(tasks) == 0 && *indexPath == "" && !*replMode && !hasDirectAction && *topologyPath == "" && *evalSuite == "" {
 		log.Fatal(`Usage:
   go run ./cmd/toolloop -repl
   go run ./cmd/toolloop -task "..."
   go run ./cmd/toolloop -agent orchestrator -task "..."
   go run ./cmd/toolloop -index documents
+  go run ./cmd/toolloop -eval fs-tool [-eval-output eval-results]
+  go run ./cmd/toolloop -eval model-backend [-eval-output eval-results]
+  go run ./cmd/toolloop -eval task -task "..." [-eval-output eval-results]
   go run ./cmd/toolloop -backend ollama -model qwen2.5:14b -task "..."
 go run ./cmd/toolloop -topology pipeline.yaml -task "Build the report"
   go run ./cmd/toolloop -scrape "https://example.com" -scrape-output sports.md
@@ -314,12 +372,21 @@ Options:
   -backend llama.cpp|ollama
   -server <url>    llama.cpp server URL (default http://localhost:8080)
   -prompt <file>   Prompt file to use as system prompt
+  -eval <suite>    Run an evaluation suite; "task" requires exactly one -task
+  -eval-output <directory> Write JSON and Markdown evaluation reports
   -topology <file> YAML graph; with -task, run the graph walk
   -topology-report <file> Write a DOT/mermaid export of the executed graph (.mmd/.mermaid/.md selects mermaid)
   -agent <name>   Run -task as the named agent (roles from AGENTS.md)`)
 	}
 
 	ctx := context.Background()
+
+	if *evalSuite == suites.FilesystemToolSuite {
+		if err := runEvaluation(ctx, nil, *evalSuite, *evalOutput); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 
 	var model engine.ChatModel
 	var embedder memory.Embedder
@@ -359,6 +426,13 @@ Options:
 	// Ensure default system prompt is set if no custom prompt was provided
 	if strings.TrimSpace(model.SystemPromptValue()) == "" {
 		model.SetSystemPrompt(defaultSystemPrompt)
+	}
+
+	if *evalSuite != "" && *evalSuite != suites.TaskSuite {
+		if err := runEvaluation(ctx, model, *evalSuite, *evalOutput); err != nil {
+			log.Fatal(err)
+		}
+		return
 	}
 
 	mem, err := memory.SQLiteMemoryV2(memoryDBPath, embedder)
@@ -405,6 +479,31 @@ Options:
 	registry.Register("shell", tools.ShellTool{})
 	registry.Register("python", tools.PythonTool{})
 	registry.Register("verdict", tools.VerdictTool{})
+
+	if *evalSuite == suites.TaskSuite {
+		execute := func(ctx context.Context, prompt string) normalTaskExecution {
+			return executeNormalTask(
+				ctx,
+				model,
+				registry,
+				prompt,
+				fmt.Sprintf("eval-task-%d", time.Now().UnixNano()),
+				"main",
+				mem,
+				rag,
+			)
+		}
+		if err := runTaskEvaluation(
+			ctx,
+			tasks[0],
+			*evalOutput,
+			evaluationPrinter(os.Stdout),
+			execute,
+		); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 
 	if *replMode {
 		runREPL(ctx, model, registry, mem, rag)

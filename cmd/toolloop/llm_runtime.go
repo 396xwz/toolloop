@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/396xwz/toolloop/internal/engine"
+	"github.com/396xwz/toolloop/internal/eval"
 	"github.com/396xwz/toolloop/internal/memory"
 )
 
@@ -138,9 +139,56 @@ type completionRequest struct {
 }
 
 type completionResponse struct {
-	Content string `json:"content"`
-	Stop    bool   `json:"stop"`
-	Model   string `json:"model"`
+	Content         string                    `json:"content"`
+	Stop            bool                      `json:"stop"`
+	Model           string                    `json:"model"`
+	TokensPredicted *int                      `json:"tokens_predicted"`
+	TokensEvaluated *int                      `json:"tokens_evaluated"`
+	NTokens         *int                      `json:"n_tokens"`
+	Timings         completionResponseTimings `json:"timings"`
+	Usage           completionResponseUsage   `json:"usage"`
+}
+
+type completionResponseTimings struct {
+	PromptN    *int `json:"prompt_n"`
+	PredictedN *int `json:"predicted_n"`
+}
+
+type completionResponseUsage struct {
+	PromptTokens     *int `json:"prompt_tokens"`
+	CompletionTokens *int `json:"completion_tokens"`
+	TotalTokens      *int `json:"total_tokens"`
+}
+
+func (r completionResponse) tokenUsage() eval.TokenUsage {
+	var usage eval.TokenUsage
+	prompt, promptKnown := firstNonNegative(r.Usage.PromptTokens, r.TokensEvaluated, r.Timings.PromptN)
+	output, outputKnown := firstNonNegative(r.Usage.CompletionTokens, r.TokensPredicted, r.Timings.PredictedN)
+	total, totalKnown := firstNonNegative(r.Usage.TotalTokens, r.NTokens)
+
+	if promptKnown {
+		usage.Prompt = prompt
+	}
+	if outputKnown {
+		usage.Output = output
+	}
+	if totalKnown {
+		// llama.cpp's slot-release n_tokens value is prompt.tokens.size():
+		// the final context size, not the number of generated tokens.
+		usage.Total = total
+	} else if promptKnown && outputKnown {
+		usage.Total = prompt + output
+	}
+	return usage
+}
+
+func firstNonNegative(values ...*int) (int, bool) {
+	for _, value := range values {
+		if value != nil && *value >= 0 {
+			return *value, true
+		}
+	}
+	return 0, false
 }
 
 func (c *LlamaClient) Complete(ctx context.Context, prompt string, temperature float64) (string, error) {
@@ -169,6 +217,7 @@ func (c *LlamaClient) CompleteN(ctx context.Context, prompt string, temperature 
 	if err := c.postJSON(ctx, "/completion", req, &out); err != nil {
 		return "", false, err
 	}
+	recordTokenUsage(ctx, out.tokenUsage())
 	if strings.TrimSpace(out.Content) == "" {
 		return "", false, fmt.Errorf("llama.cpp returned an empty completion")
 	}

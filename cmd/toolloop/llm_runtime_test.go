@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/396xwz/toolloop/internal/engine"
+	"github.com/396xwz/toolloop/internal/eval"
 )
 
 func TestLlamaGenerateFinalAnswerIncludesSystemPromptAndPlatformGuidance(t *testing.T) {
@@ -139,6 +140,86 @@ func TestLlamaCompleteNRejectsEmptyCompletion(t *testing.T) {
 	}
 	if stopped {
 		t.Error("stopped = true, want false on error")
+	}
+}
+
+func TestCompletionResponseTokenUsage(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+		want eval.TokenUsage
+	}{
+		{
+			name: "native counters",
+			json: `{"tokens_evaluated":101,"tokens_predicted":23}`,
+			want: eval.TokenUsage{Prompt: 101, Output: 23, Total: 124},
+		},
+		{
+			name: "timings fallback",
+			json: `{"timings":{"prompt_n":77,"predicted_n":9}}`,
+			want: eval.TokenUsage{Prompt: 77, Output: 9, Total: 86},
+		},
+		{
+			name: "OpenAI usage takes precedence",
+			json: `{
+				"usage":{"prompt_tokens":50,"completion_tokens":8,"total_tokens":58},
+				"tokens_evaluated":49,
+				"tokens_predicted":7
+			}`,
+			want: eval.TokenUsage{Prompt: 50, Output: 8, Total: 58},
+		},
+		{
+			name: "slot context total is not generated tokens",
+			json: `{"tokens_evaluated":4000,"n_tokens":4307}`,
+			want: eval.TokenUsage{Prompt: 4000, Output: 0, Total: 4307},
+		},
+		{
+			name: "unknown usage stays zero",
+			json: `{}`,
+			want: eval.TokenUsage{},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var response completionResponse
+			if err := json.Unmarshal([]byte(test.json), &response); err != nil {
+				t.Fatal(err)
+			}
+			if got := response.tokenUsage(); got != test.want {
+				t.Fatalf("tokenUsage() = %+v, want %+v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestLlamaCompleteNAggregatesUsagePerContext(t *testing.T) {
+	responses := []string{
+		`{"content":"first","stop":true,"tokens_evaluated":11,"tokens_predicted":3}`,
+		`{"content":"second","stop":true,"timings":{"prompt_n":17,"predicted_n":5}}`,
+	}
+	request := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if request >= len(responses) {
+			t.Fatalf("unexpected completion request %d", request+1)
+		}
+		_, _ = w.Write([]byte(responses[request]))
+		request++
+	}))
+	defer server.Close()
+
+	client := NewLlamaClient(server.URL)
+	client.HTTP = server.Client()
+	ctx, collector := withTokenUsageCollector(context.Background())
+	for range responses {
+		if _, _, err := client.CompleteN(ctx, "prompt", 0, 32); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, want := collector.snapshot(), (eval.TokenUsage{Prompt: 28, Output: 8, Total: 36}); got != want {
+		t.Fatalf("aggregated usage = %+v, want %+v", got, want)
+	}
+	if got := (&tokenUsageCollector{}).snapshot(); got != (eval.TokenUsage{}) {
+		t.Fatalf("empty collector = %+v, want zero usage", got)
 	}
 }
 
