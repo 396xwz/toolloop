@@ -140,27 +140,28 @@ func TestTaskEvaluationRunsOnceAndReportsExecutionMetrics(t *testing.T) {
 	err := runTaskEvaluation(
 		context.Background(),
 		"inspect input.txt",
+		nil,
 		outputDir,
 		evaluationPrinter(&stdout),
 		execute,
 	)
-	if err != nil {
-		t.Fatalf("runTaskEvaluation() error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), "task evaluation failed") {
+		t.Fatalf("runTaskEvaluation() error = %v, want task evaluation failed", err)
 	}
 	if calls != 1 || gotPrompt != "inspect input.txt" {
 		t.Fatalf("calls=%d prompt=%q; want one propagated execution", calls, gotPrompt)
 	}
 	answerOutput := "Task completed.\nFinal Answer:\n" + answer + "\n"
-	summaryIndex := strings.Index(stdout.String(), "Task evaluation completed:")
+	summaryIndex := strings.Index(stdout.String(), "Task evaluation failed:")
 	if !strings.HasPrefix(stdout.String(), answerOutput) || summaryIndex < len(answerOutput) {
 		t.Fatalf("answer was not printed before summary:\n%q", stdout.String())
 	}
 	if strings.Count(stdout.String(), answer) != 1 {
 		t.Fatalf("answer printed more than once:\n%q", stdout.String())
 	}
-	for _, want := range []string{"Task evaluation completed:", "1 tool calls", "1 tool errors"} {
+	for _, want := range []string{"Task evaluation failed:", "1 tool calls", "1 tool errors"} {
 		if !strings.Contains(stdout.String(), want) {
-			t.Fatalf("summary %q does not contain %q", stdout.String(), want)
+			t.Fatalf("stdout = %q, missing %q", stdout.String(), want)
 		}
 	}
 	jsonReport, err := os.ReadFile(filepath.Join(outputDir, "task.json"))
@@ -169,7 +170,7 @@ func TestTaskEvaluationRunsOnceAndReportsExecutionMetrics(t *testing.T) {
 	}
 	for _, want := range []string{
 		`"suite": "task"`,
-		`"passed": true`,
+		`"passed": false`,
 		`"tool_calls": 1`,
 		`"tool_errors": 1`,
 		`"output": "first line\nsecond line"`,
@@ -185,7 +186,7 @@ func TestTaskEvaluationRunsOnceAndReportsExecutionMetrics(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(markdown), "Tool calls: 1 (1 errors)") ||
-		!strings.Contains(string(markdown), "| task | pass |") ||
+		!strings.Contains(string(markdown), "| task | fail |") ||
 		!strings.Contains(string(markdown), "    first line\n    second line") {
 		t.Fatalf("unexpected Markdown report:\n%s", markdown)
 	}
@@ -196,17 +197,18 @@ func TestTaskEvaluationDoesNotPrintEmptyAnswer(t *testing.T) {
 	err := runTaskEvaluation(
 		context.Background(),
 		"empty answer",
+		nil,
 		newEvalTestDir(t),
 		evaluationPrinter(&stdout),
 		func(context.Context, string) normalTaskExecution {
 			return normalTaskExecution{}
 		},
 	)
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || !strings.Contains(err.Error(), "task evaluation failed") {
+		t.Fatalf("runTaskEvaluation() error = %v, want task evaluation failed", err)
 	}
 	if strings.Contains(stdout.String(), "Final Answer:") ||
-		!strings.HasPrefix(stdout.String(), "Task evaluation completed:") {
+		!strings.HasPrefix(stdout.String(), "Task evaluation failed:") {
 		t.Fatalf("unexpected output for empty answer: %q", stdout.String())
 	}
 }
@@ -220,6 +222,7 @@ func TestTaskEvaluationExecutionErrorFailsAndStillReports(t *testing.T) {
 	err := runTaskEvaluation(
 		context.Background(),
 		"fail once",
+		nil,
 		outputDir,
 		evaluationPrinter(&stdout),
 		func(context.Context, string) normalTaskExecution {
@@ -259,14 +262,15 @@ func TestTaskEvaluationUsesNormalTaskRuntimeOnce(t *testing.T) {
 	err := runTaskEvaluation(
 		context.Background(),
 		"normal runtime prompt",
+		nil,
 		newEvalTestDir(t),
 		evaluationPrinter(&bytes.Buffer{}),
 		func(ctx context.Context, prompt string) normalTaskExecution {
 			return executeNormalTask(ctx, model, registry, prompt, "eval-test", "main", nil, nil)
 		},
 	)
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || !strings.Contains(err.Error(), "task evaluation failed") {
+		t.Fatalf("runTaskEvaluation() error = %v, want task evaluation failed", err)
 	}
 	if model.calls != 1 || model.finalCalls != 1 {
 		t.Fatalf("plan calls=%d final calls=%d; want one normal task execution", model.calls, model.finalCalls)
@@ -305,14 +309,15 @@ func TestTaskEvaluationAggregatesMockedLlamaUsage(t *testing.T) {
 	err := runTaskEvaluation(
 		context.Background(),
 		"answer without tools",
+		nil,
 		outputDir,
 		evaluationPrinter(&stdout),
 		func(ctx context.Context, prompt string) normalTaskExecution {
 			return executeNormalTask(ctx, model, tools.NewToolRegistry(), prompt, "usage-test", "main", nil, nil)
 		},
 	)
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || !strings.Contains(err.Error(), "task evaluation failed") {
+		t.Fatalf("runTaskEvaluation() error = %v, want task evaluation failed", err)
 	}
 	if completionIndex != 2 {
 		t.Fatalf("completion requests = %d, want 2", completionIndex)
@@ -339,7 +344,7 @@ func TestTaskEvaluationAggregatesMockedLlamaUsage(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Tokens (prompt / output / total): 180 / 30 / 210",
-		"| task | pass |",
+		"| task | fail |",
 		"180 / 30 / 210",
 	} {
 		if !strings.Contains(string(markdown), want) {
@@ -351,16 +356,18 @@ func TestTaskEvaluationAggregatesMockedLlamaUsage(t *testing.T) {
 func TestTaskEvaluationUnknownUsageRemainsZero(t *testing.T) {
 	outputDir := newEvalTestDir(t)
 	var stdout bytes.Buffer
-	if err := runTaskEvaluation(
+	err := runTaskEvaluation(
 		context.Background(),
 		"backend without usage",
+		nil,
 		outputDir,
 		evaluationPrinter(&stdout),
 		func(context.Context, string) normalTaskExecution {
 			return normalTaskExecution{Output: "done"}
 		},
-	); err != nil {
-		t.Fatal(err)
+	)
+	if err == nil || !strings.Contains(err.Error(), "task evaluation failed") {
+		t.Fatalf("runTaskEvaluation() error = %v, want task evaluation failed", err)
 	}
 	if want := "tokens 0 prompt/0 output/0 total"; !strings.Contains(stdout.String(), want) {
 		t.Fatalf("summary %q does not contain %q", stdout.String(), want)
@@ -751,4 +758,37 @@ func newEvalTestDir(t *testing.T) string {
 	})
 	t.Setenv("TMPDIR", dir)
 	return dir
+}
+
+func TestTaskEvaluationJudgeScoresLLMCriteria(t *testing.T) {
+	const judgeJSON = `{"score": 9, "rationale": "correct tool used"}`
+	judge, _ := newTaskJudgeTestModel(t, "ollama", judgeJSON, http.StatusOK, "")
+
+	outputDir := newEvalTestDir(t)
+	var stdout bytes.Buffer
+	executor := func(_ context.Context, _ string) normalTaskExecution {
+		return normalTaskExecution{Output: "The requested task is complete."}
+	}
+	if err := runTaskEvaluation(
+		context.Background(),
+		"judge the task",
+		judge,
+		outputDir,
+		evaluationPrinter(&stdout),
+		executor,
+	); err != nil {
+		t.Fatalf("runTaskEvaluation: %v", err)
+	}
+
+	report, err := os.ReadFile(filepath.Join(outputDir, "task.json"))
+	if err != nil {
+		t.Fatalf("read task report: %v", err)
+	}
+	text := string(report)
+	if strings.Contains(text, "no_judge_configured") {
+		t.Errorf("judge-configured run still reports no_judge_configured; report:\n%s", text)
+	}
+	if !strings.Contains(text, `"rationale": "correct tool used"`) {
+		t.Errorf("llm criteria were not scored by the judge model; report:\n%s", text)
+	}
 }

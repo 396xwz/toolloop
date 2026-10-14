@@ -130,12 +130,13 @@ func fallbackPrompt(messages []LlamaMessage) string {
 }
 
 type completionRequest struct {
-	Prompt      string   `json:"prompt"`
-	NPredict    int      `json:"n_predict"`
-	Temperature float64  `json:"temperature"`
-	Stream      bool     `json:"stream"`
-	CachePrompt bool     `json:"cache_prompt"`
-	Stop        []string `json:"stop,omitempty"`
+	Prompt      string          `json:"prompt"`
+	NPredict    int             `json:"n_predict"`
+	Temperature float64         `json:"temperature"`
+	Stream      bool            `json:"stream"`
+	CachePrompt bool            `json:"cache_prompt"`
+	Stop        []string        `json:"stop,omitempty"`
+	JSONSchema  json.RawMessage `json:"json_schema,omitempty"`
 }
 
 type completionResponse struct {
@@ -201,6 +202,10 @@ func (c *LlamaClient) Complete(ctx context.Context, prompt string, temperature f
 // reports stop=false when n_predict is hit (no stop token was produced),
 // which means the output was truncated mid-thought.
 func (c *LlamaClient) CompleteN(ctx context.Context, prompt string, temperature float64, nPredict int) (string, bool, error) {
+	return c.completeN(ctx, prompt, temperature, nPredict, nil)
+}
+
+func (c *LlamaClient) completeN(ctx context.Context, prompt string, temperature float64, nPredict int, schema json.RawMessage) (string, bool, error) {
 	if nPredict <= 0 {
 		nPredict = c.NPredict
 	}
@@ -211,6 +216,7 @@ func (c *LlamaClient) CompleteN(ctx context.Context, prompt string, temperature 
 		Stream:      false,
 		CachePrompt: true,
 		Stop:        []string{"<|im_end|>", "<|endoftext|>", "</s>", "<|eot_id|>"},
+		JSONSchema:  schema,
 	}
 	var out completionResponse
 	debugf("DEBUG: POST %s prompt_len=%d n_predict=%d\n", c.url("/completion"), len(prompt), req.NPredict)
@@ -232,11 +238,21 @@ func (c *LlamaClient) Chat(ctx context.Context, messages []LlamaMessage, tempera
 // ChatBudget is Chat with an explicit token budget. Chat uses the client's
 // NPredict; callers may provide a different budget for this request.
 func (c *LlamaClient) ChatBudget(ctx context.Context, messages []LlamaMessage, temperature float64, nPredict int, fn func(LlamaChatResponse) error) error {
+	return c.chatBudget(ctx, messages, temperature, nPredict, nil, fn)
+}
+
+// ChatJSON constrains this request to a JSON object without changing ordinary
+// chat defaults. The caller's prompt and parser define the verdict's fields.
+func (c *LlamaClient) ChatJSON(ctx context.Context, messages []LlamaMessage, temperature float64, fn func(LlamaChatResponse) error) error {
+	return c.chatBudget(ctx, messages, temperature, c.NPredict, json.RawMessage(`{"type":"object"}`), fn)
+}
+
+func (c *LlamaClient) chatBudget(ctx context.Context, messages []LlamaMessage, temperature float64, nPredict int, schema json.RawMessage, fn func(LlamaChatResponse) error) error {
 	prompt, ok := c.applyTemplate(ctx, messages)
 	if !ok {
 		prompt = fallbackPrompt(messages)
 	}
-	content, stopped, err := c.CompleteN(ctx, prompt, temperature, nPredict)
+	content, stopped, err := c.completeN(ctx, prompt, temperature, nPredict, schema)
 	if err != nil {
 		return err
 	}

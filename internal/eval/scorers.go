@@ -214,26 +214,43 @@ Score the output from 0 to 10. Reply with only a JSON object:
 {"score": <number>, "reason": "<one sentence>"}
 `, input.Task, r.Output, s.Criterion)
 
-	if s.Judge == nil {
-		return ScoreDetail{ScorerName: s.Name(), Reason: "judge function is not configured"}
-	}
-	raw, err := s.Judge(ctx, s.JudgeModel, prompt)
-	if err != nil {
-		return ScoreDetail{ScorerName: s.Name(), Reason: err.Error()}
-	}
 	var response struct {
-		Score  float64 `json:"score"`
-		Reason string  `json:"reason"`
+		Score     *float64 `json:"score"`
+		Reason    string   `json:"reason"`
+		Rationale string   `json:"rationale"`
 	}
-	raw = strings.TrimSpace(raw)
-	if start, end := strings.IndexByte(raw, '{'), strings.LastIndexByte(raw, '}'); start >= 0 && end >= start {
-		raw = raw[start : end+1]
+	var judge JudgeFn
+	if s.Judge != nil {
+		judge = func(prompt string) (string, error) { return s.Judge(ctx, s.JudgeModel, prompt) }
 	}
-	if err := json.Unmarshal([]byte(raw), &response); err != nil {
-		return ScoreDetail{ScorerName: s.Name(), Reason: "invalid judge response: " + err.Error()}
+	err := runJudge(judge, prompt, func(raw string) error {
+		body, err := judgeJSON(raw)
+		if err != nil {
+			return err
+		}
+		response.Score = nil
+		response.Reason = ""
+		response.Rationale = ""
+		if err := json.Unmarshal(body, &response); err != nil {
+			return fmt.Errorf("invalid judge JSON: %w", err)
+		}
+		if response.Score == nil {
+			return fmt.Errorf("judge score is required")
+		}
+		if *response.Score < 0 {
+			return fmt.Errorf("score must be >= 0 (got %v)", *response.Score)
+		}
+		return nil
+	})
+	if err != nil {
+		judgeErr := fmt.Errorf("judge_error: %w", err)
+		return ScoreDetail{ScorerName: s.Name(), Reason: judgeErr.Error(), Err: judgeErr}
 	}
-	score := max(0, min(10, response.Score))
+	score := max(0, min(10, *response.Score))
 	pass := score >= s.MinScore
+	if response.Reason == "" {
+		response.Reason = response.Rationale
+	}
 	return ScoreDetail{
 		ScorerName: s.Name(),
 		Passed:     pass,

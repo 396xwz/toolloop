@@ -196,7 +196,7 @@ directory or the compiled binary → `python3`/`python` on `PATH`.
 
 | Flag | Description |
 |------|-------------|
-| `-task` | Task description; repeatable |
+| `-task` | Task description; repeatable normally, but exactly one non-empty value is required with `-eval task` |
 | `-backend` | Model backend: `llama.cpp` (default) or `ollama` |
 | `-repl` | Interactive REPL mode |
 | `-agent` | Run `-task` as the named agent (role from `AGENTS.md` or built-in roles); enables sub-agent delegation |
@@ -212,7 +212,75 @@ directory or the compiled binary → `python3`/`python` on `PATH`.
 | `-shell` | Pre-run shell command and inject result as context |
 | `-output` | Save full run output to a file |
 | `-prompt` | Prompt file to use as the system prompt |
+| `-eval` | Run a registered evaluation suite: `fs-tool`, `model-backend`, or `task` |
+| `-eval-output` | Evaluation report directory (default `eval-results`); requires `-eval` |
 | `-debug` | Enable debug logging |
+
+## Evaluation and rubrics
+
+Use `-eval <suite>` to run evaluations and write JSON and Markdown reports:
+
+| Suite | What it evaluates |
+|-------|-------------------|
+| `fs-tool` | Real filesystem operations against isolated fixtures; no model backend needed. |
+| `model-backend` | Model planning/tool-call output and repeated-call stability; does not execute the requested tools. |
+| `task` | One supplied task through the normal full execution loop, including actual tool execution and final-answer generation, followed by scoring. Requires a running model backend and exactly one non-empty `-task`. |
+
+After building with `go build -o toolloop ./cmd/toolloop`, try a fixed arithmetic
+task using the default llama.cpp backend at `http://localhost:8080`:
+
+```bash
+./toolloop -eval task \
+  -task "Use the shell tool to run: printf '%s\n' '2 + 2 = 4'. Return the result."
+
+# Same task, with an explicit report directory:
+./toolloop -eval task -eval-output eval-results/arithmetic \
+  -task "Use the shell tool to run: printf '%s\n' '2 + 2 = 4'. Return the result."
+```
+
+Use `-backend ollama -model qwen2.5:14b` for Ollama, or `-server <url>`
+to change the llama.cpp endpoint. Task evaluation runs real tools, so use
+the same care with writes and shell commands as with a normal task.
+
+Reports default to `eval-results/<suite>.json` and
+`eval-results/<suite>.md`: for the task suite these are `task.json` and
+`task.md`. The override above writes both files under
+`eval-results/arithmetic/`. Reusing a directory overwrites that suite's reports.
+Reports include pass/fail, latency, token usage, tool calls/errors, scorer
+results, and rubric breakdowns when present; JSON includes per-criterion
+scores and rationales. Failed cases produce a nonzero exit status.
+
+Only the `task` suite accepts `-task`. Evaluation cannot be combined with
+`-index`, `-repl`, `-agent`, `-topology`, `-topology-report`, direct tool flags
+(`-web`, `-browser`, `-scrape`, `-fs`, `-shell`), or `-output`; use
+`-eval-output` for reports instead.
+
+### Rubric scoring
+
+Rubrics are embedded YAML beside suite case definitions, not CLI input:
+there is no `-rubric` file flag. Criteria are either **deterministic**
+(local binary checks such as `json_valid`, `contains:X`, or `regex:X`) or
+**llm** (judge-assigned scores normalized by the criterion's `scale`).
+Weights must sum to 1. The total is `sum(normalized_score * weight)`, and
+the rubric passes when `total >= threshold` (inclusive).
+
+The current generic task rubric is:
+
+| Criterion | Type | Weight | Scale |
+|-----------|------|-------:|------:|
+| `correctness` | `llm` | 0.625 | 2 |
+| `no_hallucinated_fields` | `llm` | 0.375 | 2 |
+
+Its threshold is **0.8**. For example, raw scores of 2/2 for correctness and
+1/2 for no hallucinations give `1 * 0.625 + 0.5 * 0.375 = 0.8125`,
+which passes the rubric. The case must also pass all attached scorers
+(the task correctness judge requires at least 5/10) and have no execution,
+scorer, or rubric errors.
+
+The generic rubric accepts prose; requested formats are assessed by
+correctness, not an unconditional JSON-validity check. Task judging uses
+dedicated JSON judge requests on the same configured backend/model, not an
+independent judge model.
 
 ## Runtime behavior and guards
 

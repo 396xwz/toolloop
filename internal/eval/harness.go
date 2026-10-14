@@ -2,6 +2,7 @@ package eval
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -163,8 +164,31 @@ func runCase(ctx context.Context, root, component string, testCase Case, runner 
 		result.ScoreDetails = append(result.ScoreDetails, detail)
 		if detail.Err != nil {
 			result.Err = errors.Join(result.Err, detail.Err)
+			allPassed = false
 		}
 		if !detail.Passed {
+			allPassed = false
+		}
+	}
+	if testCase.Rubric != nil {
+		judge, judgeModel := rubricJudgeFromScorers(ctx, testCase.Scorers)
+		result.CriterionResults, result.RubricScore = EvaluateRubric(
+			testCase.Rubric,
+			testCase.Input.Task,
+			result.Output,
+			rubricToolCallsText(result.ToolCalls),
+			rubricArtifactsText(result.Artifacts),
+			judge,
+			judgeModel,
+		)
+		result.RubricPassed = testCase.Rubric.Passed(result.RubricScore)
+		for _, criterion := range result.CriterionResults {
+			if criterion.Err != nil {
+				result.Err = errors.Join(result.Err, fmt.Errorf("criterion %s: %w", criterion.Name, criterion.Err))
+				result.RubricPassed = false
+			}
+		}
+		if !result.RubricPassed {
 			allPassed = false
 		}
 	}
@@ -211,4 +235,54 @@ func writeFixtures(root string, files map[string]string) error {
 		}
 	}
 	return nil
+}
+
+// rubricJudgeFromScorers adapts the case's LLM-judge plumbing to a rubric JudgeFn,
+// reusing the first LLMJudgeScorer with a configured Judge closure so rubric llm
+// criteria are graded by the same model/prompt mechanism as scorers. Returns
+// (nil, "") when no scorer configures a judge: llm criteria then score 0 with
+// rationale "no_judge_configured" while deterministic checks still run.
+func rubricJudgeFromScorers(ctx context.Context, scorers []Scorer) (JudgeFn, string) {
+	for _, s := range scorers {
+		j, ok := s.(LLMJudgeScorer)
+		if !ok || j.Judge == nil {
+			continue
+		}
+		model := j.JudgeModel
+		return func(prompt string) (string, error) { return j.Judge(ctx, model, prompt) }, model
+	}
+	return nil, ""
+}
+
+// rubricToolCallsText renders ToolCallRecords as deterministic text for the judge
+// prompt: one compact JSON object per line, in call order; "" when there are no calls.
+func rubricToolCallsText(calls []ToolCallRecord) string {
+	if len(calls) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, call := range calls {
+		line, err := json.Marshal(call)
+		if err != nil {
+			line = []byte(fmt.Sprintf(`{"tool":%q,"error":%q}`, call.Tool, err.Error()))
+		}
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.Write(line)
+	}
+	return b.String()
+}
+
+// rubricArtifactsText renders Artifacts as a single JSON line; encoding/json sorts
+// map keys, so the output is deterministic for a given artifact set. "" when empty.
+func rubricArtifactsText(artifacts map[string]string) string {
+	if len(artifacts) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(artifacts)
+	if err != nil {
+		return fmt.Sprintf(`{"error":%q}`, err.Error())
+	}
+	return string(data)
 }

@@ -27,6 +27,7 @@ type Metrics struct {
 	AvgToolCalls float64 // avg tool calls per case
 	RepeatRate   float64 // % of cases that triggered repeat detection
 	ScorerStats  map[string]ScorerMetric
+	RubricStats  map[string]ScorerMetric // per-criterion rubric aggregates, keyed by criterion name
 }
 
 type ScorerMetric struct {
@@ -40,11 +41,14 @@ func Aggregate(suiteName, component string, results []Result) Metrics {
 		Component:   component,
 		TotalCases:  len(results),
 		ScorerStats: map[string]ScorerMetric{},
+		RubricStats: map[string]ScorerMetric{},
 	}
 
 	latencies := make([]time.Duration, 0, len(results))
 	scorerPasses := map[string][]float64{}
 	scorerScores := map[string][]float64{}
+	criterionPasses := map[string][]float64{}
+	criterionScores := map[string][]float64{}
 
 	for _, r := range results {
 		if r.Passed {
@@ -74,6 +78,11 @@ func Aggregate(suiteName, component string, results []Result) Metrics {
 			scorerPasses[sd.ScorerName] = append(scorerPasses[sd.ScorerName], boolScore(sd.Passed))
 			scorerScores[sd.ScorerName] = append(scorerScores[sd.ScorerName], sd.Score)
 		}
+
+		for _, cr := range r.CriterionResults {
+			criterionPasses[cr.Name] = append(criterionPasses[cr.Name], boolScore(cr.Score >= 1.0))
+			criterionScores[cr.Name] = append(criterionScores[cr.Name], cr.Score)
+		}
 	}
 
 	if len(results) == 0 {
@@ -94,6 +103,12 @@ func Aggregate(suiteName, component string, results []Result) Metrics {
 		m.ScorerStats[name] = ScorerMetric{
 			PassRate: avg(passes) * 100,
 			AvgScore: avg(scorerScores[name]),
+		}
+	}
+	for name, passes := range criterionPasses {
+		m.RubricStats[name] = ScorerMetric{
+			PassRate: avg(passes) * 100,
+			AvgScore: avg(criterionScores[name]),
 		}
 	}
 	return m

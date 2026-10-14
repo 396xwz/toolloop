@@ -9,8 +9,9 @@ import (
 )
 
 type Options struct {
-	Model ModelSuiteOptions
-	Task  string
+	Model     ModelSuiteOptions
+	Task      string
+	TaskJudge *eval.LLMJudgeScorer
 }
 
 type suiteFactory func(Options) eval.Suite
@@ -23,7 +24,7 @@ var registry = map[string]suiteFactory{
 		return NewModelStabilitySuite(opts.Model)
 	},
 	TaskSuite: func(opts Options) eval.Suite {
-		return NewTaskSuite(opts.Task)
+		return NewTaskSuite(opts.Task, opts.TaskJudge)
 	},
 }
 

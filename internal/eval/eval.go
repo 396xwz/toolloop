@@ -11,6 +11,7 @@ type Case struct {
 	Description string
 	Input       Input
 	Scorers     []Scorer // all must pass for the case to be green
+	Rubric      *Rubric  // weighted multi-criterion rubric; nil = case has no rubric
 	Tags        []string // e.g. "tool:fs", "agent:builder", "slow"
 }
 
@@ -24,18 +25,21 @@ type Input struct {
 
 // Result is everything captured from one Case execution.
 type Result struct {
-	CaseName     string
-	Passed       bool
-	ScoreDetails []ScoreDetail
-	Output       string            // raw final answer
-	Artifacts    map[string]string // named outputs ("diff", "plan", etc.)
-	ToolCalls    []ToolCallRecord  // every tool call made during the run
-	Latency      time.Duration
-	PromptTokens int
-	OutputTokens int
-	TotalTokens  int
-	Cost         float64 // USD estimate
-	Err          error
+	CaseName         string
+	Passed           bool
+	ScoreDetails     []ScoreDetail
+	Output           string            // raw final answer
+	Artifacts        map[string]string // named outputs ("diff", "plan", etc.)
+	ToolCalls        []ToolCallRecord  // every tool call made during the run
+	Latency          time.Duration
+	PromptTokens     int
+	OutputTokens     int
+	TotalTokens      int
+	Cost             float64           // USD estimate
+	CriterionResults []CriterionResult // per-criterion rubric results; empty when the case has no rubric
+	RubricScore      float64           // weighted total of the case rubric, normalized to 0-1
+	RubricPassed     bool              // RubricScore met the rubric threshold (meaningful only with a rubric)
+	Err              error
 }
 
 // ToolCallRecord captures one tool invocation for analysis.

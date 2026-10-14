@@ -496,6 +496,7 @@ Options:
 		if err := runTaskEvaluation(
 			ctx,
 			tasks[0],
+			model,
 			*evalOutput,
 			evaluationPrinter(os.Stdout),
 			execute,

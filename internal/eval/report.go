@@ -15,6 +15,9 @@ type report struct {
 	Component string         `json:"component"`
 	Metrics   reportMetrics  `json:"metrics"`
 	Cases     []reportResult `json:"cases"`
+	// rubricVersions holds version tags of the suite's rubrics for the markdown report;
+	// unexported, so it never reaches the JSON output.
+	rubricVersions []string
 }
 
 type reportMetrics struct {
@@ -36,6 +39,7 @@ type reportMetrics struct {
 	AvgToolCalls float64                 `json:"avg_tool_calls"`
 	RepeatRate   float64                 `json:"repeat_rate_pct"`
 	ScorerStats  map[string]ScorerMetric `json:"scorer_stats"`
+	RubricStats  map[string]ScorerMetric `json:"rubric_stats"`
 }
 
 type reportResult struct {
@@ -51,6 +55,15 @@ type reportResult struct {
 	TotalTokens  int               `json:"total_tokens"`
 	Cost         float64           `json:"cost_usd"`
 	Error        string            `json:"error,omitempty"`
+	// Rubric results; only populated when the case defines a rubric.
+	CriterionResults []reportCriterion `json:"criterion_results,omitempty"`
+	RubricScore      float64           `json:"rubric_score"`
+	RubricPassed     bool              `json:"rubric_passed"`
+}
+type reportCriterion struct {
+	Name      string  `json:"name"`
+	Score     float64 `json:"score"`
+	Rationale string  `json:"rationale,omitempty"`
 }
 
 type reportToolCall struct {
@@ -99,6 +112,7 @@ func makeReport(suite Suite, results []Result, metrics Metrics) report {
 			AvgToolCalls: metrics.AvgToolCalls,
 			RepeatRate:   metrics.RepeatRate,
 			ScorerStats:  metrics.ScorerStats,
+			RubricStats:  metrics.RubricStats,
 		},
 		Cases: make([]reportResult, 0, len(results)),
 	}
@@ -107,6 +121,8 @@ func makeReport(suite Suite, results []Result, metrics Metrics) report {
 			CaseName:     result.CaseName,
 			Passed:       result.Passed,
 			ScoreDetails: result.ScoreDetails,
+			RubricScore:  result.RubricScore,
+			RubricPassed: result.RubricPassed,
 			Output:       result.Output,
 			Artifacts:    result.Artifacts,
 			LatencyMS:    durationMS(result.Latency),
@@ -130,8 +146,25 @@ func makeReport(suite Suite, results []Result, metrics Metrics) report {
 			}
 			item.ToolCalls = append(item.ToolCalls, reportCall)
 		}
+		for _, cr := range result.CriterionResults {
+			item.CriterionResults = append(item.CriterionResults, reportCriterion{
+				Name:      cr.Name,
+				Score:     cr.Score,
+				Rationale: cr.Rationale,
+			})
+		}
 		data.Cases = append(data.Cases, item)
 	}
+	versionSet := make(map[string]struct{})
+	for _, c := range suite.Cases {
+		if c.Rubric != nil {
+			versionSet[RubricVersion(c.Rubric)] = struct{}{}
+		}
+	}
+	for v := range versionSet {
+		data.rubricVersions = append(data.rubricVersions, v)
+	}
+	sort.Strings(data.rubricVersions)
 	return data
 }
 
@@ -201,6 +234,28 @@ func writeMarkdownReport(path string, data report) error {
 		for _, name := range names {
 			stat := data.Metrics.ScorerStats[name]
 			fmt.Fprintf(&output, "| %s | %.2f%% | %.4f |\n", escapeMarkdown(name), stat.PassRate, stat.AvgScore)
+		}
+	}
+	rubricCases := 0
+	for _, result := range data.Cases {
+		if len(result.CriterionResults) > 0 {
+			rubricCases++
+		}
+	}
+	if rubricCases > 0 {
+		fmt.Fprintf(&output, "\n## Rubric breakdown (n=%d)\n\n", rubricCases)
+		output.WriteString("| Criterion | Avg score | Pass rate |\n|---|---:|---:|\n")
+		names := make([]string, 0, len(data.Metrics.RubricStats))
+		for name := range data.Metrics.RubricStats {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			stat := data.Metrics.RubricStats[name]
+			fmt.Fprintf(&output, "| %s | %.2f | %.0f%% |\n", escapeMarkdown(name), stat.AvgScore, stat.PassRate)
+		}
+		if len(data.rubricVersions) > 0 {
+			output.WriteString("\nrubric versions: " + strings.Join(data.rubricVersions, ", ") + "\n")
 		}
 	}
 	return os.WriteFile(path, []byte(output.String()), 0o644)
