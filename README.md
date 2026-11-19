@@ -20,6 +20,12 @@ The default backend is still llama.cpp when `-backend` is omitted. If a
 `./documents` directory exists, toolloop indexes it automatically on startup;
 use `-skip-index` to disable that optional pass.
 
+Project questions can inspect the working directory without spelling out file
+paths: the agent can list directories and read discovered files with `fs`.
+This implicit permission is read-only and limited to existing paths inside the
+current working directory (including resolved symlink targets). Explicit
+task/path permissions for other operations are unchanged.
+
 Example llama.cpp server usage:
 
 ```bash
@@ -28,7 +34,7 @@ go run ./cmd/toolloop -repl -server http://localhost:8080
 
 | Command | Backend | Notes |
 |---------|---------|-------|
-| `go run ./cmd/toolloop` | llama.cpp `/completion` | Default. Uses prompt-based JSON tool calls and `/apply-template` when available. |
+| `go run ./cmd/toolloop` | llama.cpp `/v1/chat/completions` | Default. Uses native tools and tool-result history, with JSON and `/completion` fallback. |
 | `go run ./cmd/toolloop -backend ollama` | Ollama `/api/chat` | Uses Ollama native tool calls plus JSON fallback. |
 
 The CLI entry point lives in `cmd/toolloop`. The execution loop, tools,
@@ -72,7 +78,8 @@ docs/                architecture notes
   safe `rev-parse --end-of-options` delimiter used for revision arguments that
   begin with `-`.
 - Default backend: a llama.cpp server running at `http://localhost:8080`
-  (override with `-server`) and serving `/completion`.
+  (override with `-server`) and serving `/v1/chat/completions`. Older servers
+  can fall back to `/completion` and `/apply-template`.
 - Optional Ollama backend: [Ollama](https://ollama.com) running locally; enable
   it with `-backend ollama`.
 - Optional for `scrape`: a Scrapling CLI on `PATH`, at `.venv/bin/scrapling`,
@@ -109,18 +116,21 @@ supported:
 
 The control loop is:
 
-1. `PlanNextStep` asks the selected backend what to do next and parses either
-   native tool calls (`-backend ollama`) or a prompted JSON object
-   (`-backend llama.cpp`, the default).
+1. `PlanNextStep` asks the selected backend what to do next and parses native
+   tool calls (llama.cpp and Ollama), with a prompted JSON fallback.
 2. `Engine.RunTask` executes the named tool from the registry.
 3. The loop repeats until no tool is needed, a repeat is detected, or the step
    limit is reached.
 4. `GenerateFinalAnswer` makes a second model call grounded in the gathered
    tool/step data.
 
-`LlamaCppModel` uses prompt-based tool calling because llama.cpp `/completion`
-does not expose native tool calls. The model is instructed to emit exactly one
-JSON object such as:
+`LlamaCppModel` supplies tool definitions and matching assistant-call/tool-result
+messages to llama.cpp's native chat API, letting the server decode model-specific
+tool syntax. Requests disable optional thinking so the action or answer does not
+get crowded out by reasoning. Servers without the chat endpoint (404/501) fall
+back to `/completion`, using `/apply-template` when available.
+
+JSON tool calls remain supported, for example:
 
 ```json
 {"tool":"fs","args":{"op":"read","path":"README.md"}}
@@ -296,6 +306,10 @@ independent judge model.
 - `GenerateFinalAnswer` includes the active agent's system prompt, so custom
   agents created with `-prompt` or `/agent create <name> -f <file>` keep their
   instructions for the final response.
+- Planning and final-answer requests on both backends include fresh host-local
+  date/time, weekday, and timezone context alongside the active system prompt.
+  The host clock supplies the reference for "today" and "now", including in
+  long-running REPL sessions.
 
 ## Examples
 

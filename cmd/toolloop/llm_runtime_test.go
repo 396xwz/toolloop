@@ -12,6 +12,7 @@ import (
 
 	"github.com/396xwz/toolloop/internal/engine"
 	"github.com/396xwz/toolloop/internal/eval"
+	"github.com/396xwz/toolloop/internal/tools"
 )
 
 func TestLlamaGenerateFinalAnswerIncludesSystemPromptAndPlatformGuidance(t *testing.T) {
@@ -19,14 +20,21 @@ func TestLlamaGenerateFinalAnswerIncludesSystemPromptAndPlatformGuidance(t *test
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/v1/chat/completions":
+			http.NotFound(w, r)
 		case "/apply-template":
 			var request struct {
-				Messages []LlamaMessage `json:"messages"`
+				Messages            []LlamaMessage         `json:"messages"`
+				AddGenerationPrompt bool                   `json:"add_generation_prompt"`
+				TemplateKwargs      map[string]interface{} `json:"chat_template_kwargs"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 				t.Fatalf("decode apply-template request: %v", err)
 			}
 			messages = request.Messages
+			if !request.AddGenerationPrompt || request.TemplateKwargs["enable_thinking"] != false {
+				t.Errorf("fallback must request an answer prefix without thinking: %+v", request)
+			}
 			_, _ = w.Write([]byte(`{"prompt":"rendered prompt"}`))
 		case "/completion":
 			_, _ = w.Write([]byte(`{"content":"done","stop":true}`))
@@ -233,6 +241,8 @@ func runPlanNextStep(t *testing.T, task *engine.Task, fixedContent string) (*eng
 	var messages []LlamaMessage
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/v1/chat/completions":
+			http.NotFound(w, r)
 		case "/apply-template":
 			var request struct {
 				Messages []LlamaMessage `json:"messages"`
@@ -312,9 +322,7 @@ func TestPlanNextStepStillBlocksNonPlanFiles(t *testing.T) {
 	}
 }
 
-// AC3: blocked steps (Plan "Blocked: ...", no ToolCall) appear as assistant
-// messages in the history of subsequent PlanNextStep calls, in step order,
-// alongside executed tool steps.
+// Blocked steps appear as feedback alongside native call/result history.
 func TestPlanNextStepIncludesBlockedStepsInHistory(t *testing.T) {
 	task := &engine.Task{
 		Description: seattleTask,
@@ -329,19 +337,156 @@ func TestPlanNextStepIncludesBlockedStepsInHistory(t *testing.T) {
 		},
 	}
 	_, messages := runPlanNextStep(t, task, "no more tools needed")
-	if len(messages) != 4 {
-		t.Fatalf("message count = %d, want 4: %#v", len(messages), messages)
+	if len(messages) != 5 {
+		t.Fatalf("message count = %d, want 5: %#v", len(messages), messages)
 	}
 	if messages[0].Role != "system" {
 		t.Errorf("messages[0].Role = %q, want system", messages[0].Role)
 	}
-	if messages[1].Role != "assistant" || messages[1].Content != "Tool fs returned: no such file" {
-		t.Errorf("messages[1] = %#v, want assistant tool result", messages[1])
+	if messages[1].Role != "user" {
+		t.Errorf("messages[1] = %#v, want user task", messages[1])
 	}
-	if messages[2].Role != "assistant" || messages[2].Content != "Blocked: fs op not allowed by task text" {
-		t.Errorf("messages[2] = %#v, want assistant block reason", messages[2])
+	if messages[2].Role != "assistant" || len(messages[2].ToolCalls) != 1 {
+		t.Fatalf("messages[2] = %#v, want assistant tool call", messages[2])
 	}
-	if messages[3].Role != "user" {
-		t.Errorf("messages[3].Role = %q, want user", messages[3].Role)
+	if messages[3].Role != "tool" || messages[3].Content != "no such file" || messages[3].ToolCallID != messages[2].ToolCalls[0].ID {
+		t.Errorf("messages[3] = %#v, want matching tool result", messages[3])
+	}
+	if messages[4].Role != "user" || messages[4].Content != "Blocked: fs op not allowed by task text" {
+		t.Errorf("messages[4] = %#v, want blocked-response feedback", messages[4])
+	}
+}
+
+func TestLlamaNativeToolProtocolAndHistory(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{"browser", "url", "https://www.google.com/search?q=current+weather+in+Seattle+WA"},
+		{"scrape", "url", "https://www.weather.com/en-US/weather/today/l/USWA0997/5391847"},
+		{"web_search", "query", "current temperature in Seattle, WA"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/chat/completions" {
+					t.Errorf("unexpected legacy request: %s", r.URL.Path)
+					http.NotFound(w, r)
+					return
+				}
+				var request struct {
+					Messages []LlamaMessage `json:"messages"`
+					Tools    []struct {
+						Function struct {
+							Name string `json:"name"`
+						} `json:"function"`
+					} `json:"tools"`
+					TemplateKwargs map[string]interface{} `json:"chat_template_kwargs"`
+					MaxTokens      int                    `json:"max_tokens"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Error(err)
+					http.Error(w, "bad request", http.StatusBadRequest)
+					return
+				}
+				if request.TemplateKwargs["enable_thinking"] != false || request.MaxTokens != 2048 {
+					t.Errorf("request must disable thinking, not raise the budget: %+v", request)
+				}
+				if len(request.Tools) != 1 || request.Tools[0].Function.Name != test.name {
+					t.Errorf("tool definitions do not match registry: %+v", request.Tools)
+				}
+				messages := request.Messages
+				if len(messages) != 4 || messages[0].Role != "system" || messages[1].Role != "user" ||
+					messages[2].Role != "assistant" || len(messages[2].ToolCalls) != 1 ||
+					messages[3].Role != "tool" {
+					t.Fatalf("incorrect native history: %+v", messages)
+				}
+				if messages[3].ToolCallID != messages[2].ToolCalls[0].ID || messages[3].Content != "No good results found" {
+					t.Errorf("tool response is not matched to its call: %+v", messages[3])
+				}
+				args, _ := json.Marshal(map[string]string{test.key: test.value})
+				// Captured Gemma chat responses carry arguments as a JSON string;
+				// native tool markers are decoded by llama.cpp, not text regexes.
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"choices": []interface{}{map[string]interface{}{
+						"finish_reason": "tool_calls",
+						"message": map[string]interface{}{
+							"role": "assistant", "content": nil,
+							"reasoning_content": `<|tool_call>call:shell{cmd: "not an action"}<tool_call|>`,
+							"tool_calls": []interface{}{map[string]interface{}{
+								"id": "native_call", "type": "function",
+								"function": map[string]interface{}{"name": test.name, "arguments": string(args)},
+							}},
+						},
+					}},
+				})
+			}))
+			defer server.Close()
+			reg := tools.NewToolRegistry()
+			reg.Register(test.name, tools.WebSearchTool{})
+			model := &LlamaCppModel{Client: NewLlamaClient(server.URL)}
+			step, err := model.PlanNextStep(context.Background(), &engine.Task{
+				Description: "Current Seattle weather", Tools: reg,
+				Steps: []*engine.Step{{Index: 0, ToolCall: &engine.ToolCall{
+					Name: "web_search", Args: map[string]string{"query": "Seattle"},
+				}, Result: "No good results found"}},
+			})
+			if err != nil || step.ToolCall == nil || step.ToolCall.Name != test.name || step.ToolCall.Args[test.key] != test.value {
+				t.Fatalf("native call not recovered: step=%+v err=%v", step, err)
+			}
+		})
+	}
+}
+
+func TestLlamaNativeFinalRejectsCalls(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+			return
+		}
+		if _, ok := request["tools"]; ok {
+			t.Error("final-answer request must not offer tools")
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"finish_reason":"tool_calls","message":{
+			"role":"assistant","content":"I need another search.",
+			"tool_calls":[{"id":"native_final","type":"function","function":{
+				"name":"web_search","arguments":{"query":"Seattle weather"}
+			}}]
+		}}]}`))
+	}))
+	defer server.Close()
+	model := &LlamaCppModel{Client: NewLlamaClient(server.URL)}
+	answer, err := model.GenerateFinalAnswer(context.Background(), &engine.Task{Description: "Seattle weather"})
+	if err == nil || answer != "" {
+		t.Fatalf("native final call accepted as an answer: %q, err=%v", answer, err)
+	}
+}
+
+func TestLlamaNativeChatRejectsTruncationAndReasoningOnlyActions(t *testing.T) {
+	for _, finish := range []string{"length", "stop"} {
+		t.Run(finish, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"choices": []interface{}{map[string]interface{}{
+						"finish_reason": finish,
+						"message": map[string]string{
+							"role": "assistant", "content": "",
+							"reasoning_content": `<|tool_call>call:web_search{query:Seattle}<tool_call|>`,
+						},
+					}},
+				})
+			}))
+			defer server.Close()
+			model := &LlamaCppModel{Client: NewLlamaClient(server.URL)}
+			step, err := model.PlanNextStep(context.Background(), &engine.Task{Description: "Seattle weather"})
+			if finish == "length" {
+				if err == nil || !strings.Contains(err.Error(), "token budget") || step != nil {
+					t.Fatalf("truncation must fail instead of causing 32 retries: step=%+v err=%v", step, err)
+				}
+			} else if err != nil || step.ToolCall != nil || !strings.HasPrefix(step.Plan, "Blocked:") {
+				t.Fatalf("reasoning-only action escaped: step=%+v err=%v", step, err)
+			}
+		})
 	}
 }

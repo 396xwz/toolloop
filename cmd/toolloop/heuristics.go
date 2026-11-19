@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -530,6 +532,50 @@ func isKnowledgeQuestion(s string) bool {
 }
 
 // ─── PATH / FS GUARDS ───────────────────────────────────────────────
+
+// Implicit inspection is read-only and confined to existing workspace paths.
+// Resolve symlinks before granting this permission; explicit task permissions
+// below remain separate, including their existing write/edit restrictions.
+func isWorkspaceFSRead(op, path string) bool {
+	switch op {
+	case "list", "tree", "read", "read_many", "info":
+	default:
+		return false
+	}
+	root, err := os.Getwd()
+	if err != nil {
+		return false
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return false
+	}
+	paths := []string{path}
+	if op == "read_many" {
+		paths = strings.Fields(strings.ReplaceAll(path, ",", " "))
+	}
+	if len(paths) == 0 {
+		return false
+	}
+	for _, path := range paths {
+		if path == "" {
+			return false
+		}
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return false
+		}
+		resolved, err := filepath.EvalSymlinks(abs)
+		if err != nil {
+			return false
+		}
+		rel, err := filepath.Rel(root, resolved)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+			return false
+		}
+	}
+	return true
+}
 
 func extractPaths(s string) []string {
 	var paths []string

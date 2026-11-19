@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -14,14 +15,17 @@ import (
 	"github.com/396xwz/toolloop/internal/engine"
 	"github.com/396xwz/toolloop/internal/eval"
 	"github.com/396xwz/toolloop/internal/memory"
+	"github.com/396xwz/toolloop/internal/tools"
 )
 
 const defaultLlamaURL = "http://localhost:8080"
 
 type LlamaMessage struct {
-	Role      string          `json:"role"`
-	Content   string          `json:"content"`
-	ToolCalls []LlamaToolCall `json:"-"`
+	Role       string          `json:"role"`
+	Content    string          `json:"content"`
+	ToolCalls  []LlamaToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string          `json:"tool_call_id,omitempty"`
+	Name       string          `json:"name,omitempty"`
 }
 
 type LlamaToolCallFunction struct {
@@ -29,15 +33,48 @@ type LlamaToolCallFunction struct {
 	Arguments map[string]interface{} `json:"arguments"`
 }
 
+func (f *LlamaToolCallFunction) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	f.Name = raw.Name
+	args := raw.Arguments
+	if len(args) > 0 && args[0] == '"' {
+		var text string
+		if err := json.Unmarshal(args, &text); err != nil {
+			return err
+		}
+		args = []byte(text)
+	}
+	if len(args) == 0 {
+		return nil
+	}
+	return json.Unmarshal(args, &f.Arguments)
+}
+
 type LlamaToolCall struct {
+	ID       string                `json:"id,omitempty"`
+	Type     string                `json:"type,omitempty"`
 	Function LlamaToolCallFunction `json:"function"`
 }
 
+type llamaHTTPError struct {
+	status  int
+	message string
+}
+
+func (e *llamaHTTPError) Error() string { return e.message }
+
 type LlamaChatResponse struct {
-	Message LlamaMessage
-	Done    bool
-	Raw     string
-	Stopped bool // true when the server stopped because of the token budget (no stop token)
+	Message         LlamaMessage
+	Done            bool
+	Raw             string
+	Stopped         bool // true when the server stopped because of the token budget (no stop token)
+	NativeToolCalls bool
 }
 
 type LlamaClient struct {
@@ -84,7 +121,10 @@ func (c *LlamaClient) postJSON(ctx context.Context, path string, body interface{
 		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("%s %s: %s: %s", http.MethodPost, c.url(path), resp.Status, truncate(string(data), 500))
+		return &llamaHTTPError{resp.StatusCode, fmt.Sprintf("%s %s: %s: %s", http.MethodPost, c.url(path), resp.Status, truncate(string(data), 500))}
+	}
+	if path == "/completion" || path == "/v1/chat/completions" {
+		debugf("DEBUG: %s response: %s\n", path, data)
 	}
 	if out == nil {
 		return nil
@@ -99,7 +139,11 @@ func (c *LlamaClient) applyTemplate(ctx context.Context, messages []LlamaMessage
 	var out struct {
 		Prompt string `json:"prompt"`
 	}
-	body := map[string]interface{}{"messages": messages}
+	body := map[string]interface{}{
+		"messages":              messages,
+		"add_generation_prompt": true,
+		"chat_template_kwargs":  map[string]interface{}{"enable_thinking": false},
+	}
 	if err := c.postJSON(ctx, "/apply-template", body, &out); err != nil {
 		debugf("DEBUG: /apply-template unavailable: %v\n", err)
 		c.tmplChecked = true
@@ -264,6 +308,96 @@ func (c *LlamaClient) chatBudget(ctx context.Context, messages []LlamaMessage, t
 	return fn(LlamaChatResponse{Message: msg, Done: true, Stopped: stopped, Raw: content})
 }
 
+// ChatTools lets llama.cpp apply the model's native tool grammar and decode
+// calls separately from reasoning, instead of guessing that grammar in text.
+func (c *LlamaClient) ChatTools(ctx context.Context, model string, messages []LlamaMessage, definitions []interface{}, fn func(LlamaChatResponse) error) error {
+	body := map[string]interface{}{
+		"model": model, "messages": messages, "stream": false,
+		"temperature": 0.0, "max_tokens": c.NPredict,
+		"chat_template_kwargs": map[string]interface{}{"enable_thinking": false},
+	}
+	if len(definitions) > 0 {
+		body["tools"] = definitions
+	}
+	var out struct {
+		Choices []struct {
+			Message      LlamaMessage `json:"message"`
+			FinishReason string       `json:"finish_reason"`
+		} `json:"choices"`
+		Usage completionResponseUsage `json:"usage"`
+	}
+	if err := c.postJSON(ctx, "/v1/chat/completions", body, &out); err != nil {
+		if status, ok := err.(*llamaHTTPError); ok && (status.status == http.StatusNotFound || status.status == http.StatusNotImplemented) {
+			return c.Chat(ctx, messages, 0, fn)
+		}
+		return err
+	}
+	recordTokenUsage(ctx, (completionResponse{Usage: out.Usage}).tokenUsage())
+	if len(out.Choices) == 0 {
+		return fmt.Errorf("llama.cpp returned no chat choices")
+	}
+	choice := out.Choices[0]
+	if choice.FinishReason == "length" {
+		return fmt.Errorf("llama.cpp chat response exceeded the token budget")
+	}
+	msg := choice.Message
+	nativeToolCalls := len(msg.ToolCalls) > 0
+	raw := msg.Content
+	msg.Content = stripReasoning(msg.Content)
+	if len(msg.ToolCalls) == 0 {
+		msg.ToolCalls = extractLlamaToolCalls(msg.Content)
+	}
+	if fn == nil {
+		return nil
+	}
+	return fn(LlamaChatResponse{Message: msg, Done: true, Raw: raw, NativeToolCalls: nativeToolCalls})
+}
+
+func llamaToolDefinitions(reg tools.ToolRegistry) []interface{} {
+	names := reg.Names()
+	allowed := make(map[string]bool)
+	for _, name := range names {
+		allowed[name] = true
+	}
+	var definitions []interface{}
+	for _, tool := range buildOllamaTools() {
+		if len(names) == 0 || allowed[tool.Function.Name] {
+			definitions = append(definitions, tool)
+			delete(allowed, tool.Function.Name)
+		}
+	}
+	for _, name := range names {
+		if !allowed[name] {
+			continue
+		}
+		properties := map[string]interface{}{}
+		required := []string{}
+		switch name {
+		case "agent":
+			required = []string{"name", "task"}
+			for _, key := range []string{"name", "task", "prompt"} {
+				properties[key] = map[string]string{"type": "string"}
+			}
+		case "verdict":
+			required = []string{"status"}
+			for _, key := range []string{"status", "reason"} {
+				properties[key] = map[string]string{"type": "string"}
+			}
+		}
+		definitions = append(definitions, map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name": name, "description": "Use the arguments described in the system instructions.",
+				"parameters": map[string]interface{}{
+					"type": "object", "properties": properties, "required": required,
+					"additionalProperties": map[string]string{"type": "string"},
+				},
+			},
+		})
+	}
+	return definitions
+}
+
 type LlamaEmbedder struct {
 	Client *LlamaClient
 }
@@ -315,25 +449,26 @@ func flattenFloats(raw json.RawMessage) ([]float32, error) {
 }
 
 func extractLlamaToolCalls(content string) []LlamaToolCall {
-	content = strings.TrimSpace(content)
+	content = normalizeResponse(content, false)
 	if content == "" {
 		return nil
 	}
-	if name, args, err := parseToolJSON(content); err == nil && name != "" && name != "none" {
-		return []LlamaToolCall{{Function: LlamaToolCallFunction{Name: name, Arguments: stringMapToAny(args)}}}
-	}
-	if args, ok := forceFSArgsFromContent(content); ok {
-		return []LlamaToolCall{{Function: LlamaToolCallFunction{Name: "fs", Arguments: stringMapToAny(args)}}}
-	}
-	for _, obj := range extractJSONObjects(content) {
-		if name, args, err := parseToolJSON(obj); err == nil && name != "" && name != "none" {
+	for _, obj := range append([]string{content}, extractJSONObjects(content)...) {
+		if !isToolEnvelope(obj) {
+			continue
+		}
+		name, args, err := parseToolJSON(obj)
+		if err == nil && name != "" && name != "none" &&
+			!argsLookCorrupt(args) && hasMinimumArgs(name, args) {
 			return []LlamaToolCall{{Function: LlamaToolCallFunction{Name: name, Arguments: stringMapToAny(args)}}}
 		}
-		if args, ok := forceFSArgsFromContent(obj); ok {
-			return []LlamaToolCall{{Function: LlamaToolCallFunction{Name: "fs", Arguments: stringMapToAny(args)}}}
+		if (name == "" || name == "fs") && strings.HasPrefix(cleanJSON(obj), "{") {
+			if args, ok := forceFSArgsFromContent(obj); ok && hasMinimumArgs("fs", args) {
+				return []LlamaToolCall{{Function: LlamaToolCallFunction{Name: "fs", Arguments: stringMapToAny(args)}}}
+			}
 		}
 	}
-	if args, ok := extractFSCommandFromText(content); ok {
+	if args, ok := extractFSCommandFromText(content); ok && !argsLookCorrupt(args) && hasMinimumArgs("fs", args) {
 		return []LlamaToolCall{{Function: LlamaToolCallFunction{Name: "fs", Arguments: stringMapToAny(args)}}}
 	}
 	return nil
@@ -347,30 +482,220 @@ func stringMapToAny(in map[string]string) map[string]interface{} {
 	return out
 }
 
+var responseMarker = regexp.MustCompile(`^(?:</?(?:think|reasoning|thought)>|\[/?THINK\]|<\|channel\|?>\s*(analysis|thought|reasoning|final|answer|commentary)\b|<channel\|>|<\|(?:start|im_start)\|>assistant|<\|start_header_id\|>assistant<\|end_header_id\|>|<\|(?:message|im_sep|end|im_end|eot_id|endoftext|fim_suffix|return)\|>)`)
+
+// Keep reasoning out of both tool extraction and user-visible answers. An
+// unfinished reasoning block is discarded, never used as a fallback answer.
 func stripReasoning(s string) string {
-	original := strings.TrimSpace(s)
-	s = original
-	for _, tag := range []string{"think", "reasoning", "thought"} {
-		open, close := "<"+tag+">", "</"+tag+">"
-		for {
-			i := strings.Index(s, open)
-			j := strings.Index(s, close)
-			if j < 0 {
-				break
+	return normalizeResponse(s, true)
+}
+
+func normalizeResponse(s string, preserveCode bool) string {
+	var out strings.Builder
+	var tags []string
+	channelThought := false
+	for i := 0; i < len(s); {
+		hidden := len(tags) > 0 || channelThought
+		if preserveCode && s[i] == '`' {
+			n := 1
+			for i+n < len(s) && s[i+n] == '`' {
+				n++
 			}
-			if i >= 0 && i < j {
-				s = s[:i] + s[j+len(close):]
+			if end := strings.Index(s[i+n:], s[i:i+n]); end >= 0 {
+				end += i + 2*n
+				if !hidden {
+					out.WriteString(s[i:end])
+				}
+				i = end
 				continue
 			}
-			s = s[j+len(close):]
+		}
+		// Only structured values protect their strings. A prose inch mark or
+		// unmatched quotation must not hide a subsequent reasoning boundary.
+		if s[i] == '{' || s[i] == '[' {
+			var value json.RawMessage
+			decoder := json.NewDecoder(strings.NewReader(s[i:]))
+			if decoder.Decode(&value) == nil {
+				end := i + int(decoder.InputOffset())
+				if !hidden {
+					out.WriteString(s[i:end])
+				}
+				i = end
+				continue
+			}
+		}
+		if s[i] == '<' || s[i] == '[' {
+			if match := responseMarker.FindStringSubmatch(s[i:]); match != nil {
+				token := match[0]
+				// A quoted marker literal in an explanation is not a wrapper.
+				if i > 0 && s[i-1] == '"' && i+len(token) < len(s) && s[i+len(token)] == '"' {
+					if !hidden {
+						out.WriteString(token)
+					}
+					i += len(token)
+					continue
+				}
+				switch {
+				case strings.HasPrefix(token, "</") || token == "[/THINK]":
+					tag := token[2 : len(token)-1]
+					if token == "[/THINK]" {
+						tag = "think"
+					}
+					if len(tags) > 0 {
+						if tags[len(tags)-1] == tag {
+							tags = tags[:len(tags)-1]
+						}
+					} else {
+						// Some templates prefill the opening think tag.
+						out.Reset()
+					}
+				case token == "[THINK]":
+					tags = append(tags, "think")
+				case token == "<think>" || token == "<reasoning>" || token == "<thought>":
+					tags = append(tags, token[1:len(token)-1])
+				case match[1] != "":
+					channelThought = match[1] == "analysis" || match[1] == "thought" || match[1] == "reasoning"
+				case token == "<channel|>":
+					channelThought = false
+				}
+				i += len(token)
+				continue
+			}
+		}
+		if !hidden {
+			out.WriteByte(s[i])
+		}
+		i++
+	}
+	return strings.TrimSpace(out.String())
+}
+
+var toolIntent = regexp.MustCompile(`(?mi)(?:"(?:tool|tool_name|tool_calls|args|arguments)"\s*:|^\s*(?:tool|tool_name)\s*[:=]|^\s*to=\S+|^\s*fs\s+(?:op=|read|write|edit|list|tree|info)\b|<tool_call\b|<function=)`)
+var protocolEcho = regexp.MustCompile(`(?mi)(\|\s*(?:Tool|Result):|see tool output above|Call a tool if needed\. Otherwise respond with a short note that no tool is required\.|<\||<channel\||^\s*(?:</?(?:think|reasoning|thought)\b|\[/?THINK\]|Previous steps:))`)
+
+func isToolEnvelope(content string) bool {
+	raw := cleanJSON(content)
+	var fields map[string]json.RawMessage
+	if json.Unmarshal([]byte(raw), &fields) != nil {
+		return false
+	}
+	explicit := fields["tool"] != nil || fields["tool_name"] != nil
+	if fields["tool_calls"] != nil ||
+		((explicit || fields["name"] != nil) && (fields["args"] != nil || fields["arguments"] != nil)) ||
+		(explicit && (len(fields) == 1 || fields["plan"] != nil)) {
+		return true
+	}
+	if function := fields["function"]; function != nil && isToolEnvelope(string(function)) {
+		return true
+	}
+	name, _, err := parseToolJSON(raw)
+	if err == nil {
+		if explicit {
+			return true
+		}
+		switch name {
+		case "fs", "shell", "browser", "web_search", "scrape", "python":
+			return true
 		}
 	}
-	stripped := strings.TrimSpace(s)
-	if stripped == "" && original != "" {
-		debugf("DEBUG: stripReasoning would return empty; keeping raw content (len=%d)\n", len(original))
-		return original
+	if fields["name"] == nil {
+		_, ok := forceFSArgsFromContent(raw)
+		return ok
 	}
-	return stripped
+	return false
+}
+
+func responseProblem(content string) string {
+	if strings.TrimSpace(content) == "" {
+		return "empty response after removing reasoning"
+	}
+	for _, obj := range extractJSONObjects(content) {
+		if !json.Valid([]byte(obj)) {
+			continue
+		}
+		if isToolEnvelope(obj) {
+			return "tool request instead of plain text"
+		}
+		content = strings.Replace(content, obj, "", 1)
+	}
+	switch {
+	case protocolEcho.MatchString(content):
+		return "echoed or malformed response protocol"
+	case toolIntent.MatchString(content):
+		return "tool request instead of plain text"
+	}
+	return ""
+}
+
+var fencedResponseCode = regexp.MustCompile("(?ms)^[ \\t]*```+([^\\n`]*)\\n(.*?)^[ \\t]*```+[ \\t]*(?:\\n|$)")
+var inlineResponseCode = regexp.MustCompile("`+[^`\\n]+`+")
+var actionPreface = regexp.MustCompile(`(?mi)(?:^|\n)\s*(?:next action|action|tool call|next tool call)\s*:\s*$`)
+var examplePreface = regexp.MustCompile(`(?i)\b(?:example|sample|syntax|configur(?:e|ation)|data|schema|code|script|snippet|function|program|implementation)\b`)
+
+func finalResponseText(answer string) string {
+	var out strings.Builder
+	start := 0
+	for _, match := range fencedResponseCode.FindAllStringSubmatchIndex(answer, -1) {
+		prefix := strings.TrimSpace(answer[:match[0]])
+		language := strings.ToLower(strings.TrimSpace(answer[match[2]:match[3]]))
+		body := strings.TrimSpace(answer[match[4]:match[5]])
+		explanation := examplePreface.MatchString(prefix) && !actionPreface.MatchString(prefix) &&
+			!protocolEcho.MatchString(prefix) && !toolIntent.MatchString(prefix)
+		code := language != "" && language != "json" && language != "text" &&
+			!actionPreface.MatchString(prefix) && !protocolEcho.MatchString(body) &&
+			!isToolEnvelope(body) && !(strings.HasPrefix(body, "{") && toolIntent.MatchString(body))
+		if explanation || code {
+			out.WriteString(answer[start:match[0]])
+			out.WriteByte('\n')
+			start = match[1]
+		}
+	}
+	out.WriteString(answer[start:])
+	text := out.String()
+	out.Reset()
+	start = 0
+	for _, match := range inlineResponseCode.FindAllStringIndex(text, -1) {
+		prefix, suffix := text[:match[0]], text[match[1]:]
+		body := strings.Trim(text[match[0]:match[1]], "`")
+		action := isToolEnvelope(body) || toolIntent.MatchString(body)
+		if strings.TrimSpace(prefix+suffix) != "" && !actionPreface.MatchString(strings.TrimSpace(prefix)) &&
+			(!action || examplePreface.MatchString(prefix+" "+suffix)) {
+			out.WriteString(text[start:match[0]])
+			out.WriteByte(' ')
+			start = match[1]
+		}
+	}
+	out.WriteString(text[start:])
+	return out.String()
+}
+
+func finalAnswer(content string, hasToolCalls bool) (string, error) {
+	answer := stripReasoning(content)
+	if hasToolCalls {
+		return "", fmt.Errorf("model returned a tool request instead of a final answer")
+	}
+	if answer == "" {
+		return "", fmt.Errorf("invalid final answer: empty response after removing reasoning")
+	}
+	// Explanatory code examples are data; standalone action envelopes and
+	// blocks introduced as the next action still require actual execution.
+	if text := finalResponseText(answer); strings.TrimSpace(text) != "" {
+		if problem := responseProblem(text); problem != "" {
+			return "", fmt.Errorf("invalid final answer: %s", problem)
+		}
+	}
+	return answer, nil
+}
+
+func stepHistoryPlan(step *engine.Step) string {
+	if step.ToolCall != nil && step.ToolCall.Name != "" {
+		return fmt.Sprintf("call %s %v", step.ToolCall.Name, step.ToolCall.Args)
+	}
+	plan := stripReasoning(step.Plan)
+	if responseProblem(plan) != "" {
+		return ""
+	}
+	return plan
 }
 
 func extractJSONObjects(s string) []string {
@@ -393,7 +718,7 @@ func extractJSONObjects(s string) []string {
 		}
 		switch r {
 		case '"':
-			inStr = true
+			inStr = depth > 0
 		case '{':
 			if depth == 0 {
 				start = i
@@ -469,7 +794,7 @@ func (m *LlamaCppModel) PlanNextStep(ctx context.Context, task *engine.Task) (*e
 			resultInfo = fmt.Sprintf("(%d chars, see tool output above)", len(s.Result))
 		}
 		history += fmt.Sprintf("- Step %d: %s | Tool: %s | Result: %s\n",
-			s.Index, s.Plan, toolInfo, resultInfo)
+			s.Index, stepHistoryPlan(s), toolInfo, resultInfo)
 	}
 	if history == "" {
 		history = "(no previous steps)"
@@ -493,7 +818,7 @@ func (m *LlamaCppModel) PlanNextStep(ctx context.Context, task *engine.Task) (*e
 	if strings.TrimSpace(system) == "" {
 		system = defaultSystemPrompt
 	}
-	system = system + "\n\n" + toolInstructionsFor(task.Tools) + "\n\n" + hostPlatformInstructions(runtime.GOOS)
+	system = system + "\n\n" + toolInstructionsFor(task.Tools) + "\n\n" + hostPlatformInstructions(runtime.GOOS) + "\n\n" + currentTimeContext(time.Now())
 
 	user := fmt.Sprintf(`Task:
 %s
@@ -508,18 +833,25 @@ Previous steps:
 Call a tool if needed. Otherwise respond with a short note that no tool is required.`,
 		task.Description, history, memBlock, ragBlock)
 
-	messages := []LlamaMessage{{Role: "system", Content: system}}
+	messages := []LlamaMessage{{Role: "system", Content: system}, {Role: "user", Content: user}}
 	for _, s := range task.Steps {
 		if s.ToolCall != nil && s.ToolCall.Name != "" {
 			res := truncate(s.Result, maxStepResultChars)
-			messages = append(messages, LlamaMessage{Role: "assistant", Content: fmt.Sprintf("Tool %s returned: %s", s.ToolCall.Name, res)})
+			id := fmt.Sprintf("call_%d", s.Index)
+			messages = append(messages,
+				LlamaMessage{Role: "assistant", ToolCalls: []LlamaToolCall{{
+					ID: id, Type: "function",
+					Function: LlamaToolCallFunction{Name: s.ToolCall.Name, Arguments: stringMapToAny(s.ToolCall.Args)},
+				}}},
+				LlamaMessage{Role: "tool", Name: s.ToolCall.Name, ToolCallID: id, Content: res},
+			)
+			debugf("DEBUG: tool result %s (%d chars):\n%s\n", s.ToolCall.Name, len(s.Result), s.Result)
 		} else if strings.HasPrefix(strings.TrimSpace(s.Plan), "Blocked:") {
 			// Blocked steps carry no ToolCall; surface the block reason so the
 			// model sees its own blocked attempts and adapts.
-			messages = append(messages, LlamaMessage{Role: "assistant", Content: s.Plan})
+			messages = append(messages, LlamaMessage{Role: "user", Content: s.Plan})
 		}
 	}
-	messages = append(messages, LlamaMessage{Role: "user", Content: user})
 
 	var last LlamaChatResponse
 	var toolful []LlamaChatResponse
@@ -527,7 +859,7 @@ Call a tool if needed. Otherwise respond with a short note that no tool is requi
 		m.ModelName(), m.Client.BaseURL, len(messages))
 	ctx2, cancel := context.WithTimeout(ctx, Timeout*time.Second)
 	defer cancel()
-	err := m.Client.Chat(ctx2, messages, 0.0, func(resp LlamaChatResponse) error {
+	err := m.Client.ChatTools(ctx2, m.ModelName(), messages, llamaToolDefinitions(task.Tools), func(resp LlamaChatResponse) error {
 		debugf("DEBUG: received chat chunk content_len=%d toolcalls=%d raw=%q\n", len(resp.Message.Content), len(resp.Message.ToolCalls), truncate(resp.Message.Content, 500))
 		last = resp
 		if len(resp.Message.ToolCalls) > 0 {
@@ -551,8 +883,8 @@ Call a tool if needed. Otherwise respond with a short note that no tool is requi
 
 	name, args, ok := resolveLlamaToolFromResponse(last.Message)
 	if !ok {
-		if step.Plan == "" {
-			step.Plan = "No more tools needed"
+		if problem := responseProblem(step.Plan); problem != "" || len(last.Message.ToolCalls) > 0 {
+			step.Plan = "Blocked: invalid model response; return a valid tool call or a plain-text completion note"
 		}
 		return step, nil
 	}
@@ -565,7 +897,7 @@ Call a tool if needed. Otherwise respond with a short note that no tool is requi
 
 		// plan.md is the orchestrator's working file; exempt it from both
 		// gates so the main REPL agent can always read/write its plan.
-		if !isPlanFile(path) {
+		if !isPlanFile(path) && !isWorkspaceFSRead(op, path) {
 			if op != "" && !taskAllowsFSOp(task.Description, op) {
 				d := strings.ToLower(task.Description)
 				if !(strings.Contains(d, "read") || strings.Contains(d, "open") ||
@@ -583,9 +915,7 @@ Call a tool if needed. Otherwise respond with a short note that no tool is requi
 	}
 
 	step.ToolCall = &engine.ToolCall{Name: name, Args: args}
-	if step.Plan == "" || strings.HasPrefix(strings.TrimSpace(step.Plan), "{") {
-		step.Plan = fmt.Sprintf("call %s %v", name, args)
-	}
+	step.Plan = fmt.Sprintf("call %s %v", name, args)
 	return step, nil
 }
 
@@ -597,7 +927,7 @@ func (m *LlamaCppModel) GenerateFinalAnswer(ctx context.Context, task *engine.Ta
 			usedTools = true
 		}
 		history += fmt.Sprintf("Step %d:\nPlan: %s\nResult:\n%s\n\n",
-			s.Index, s.Plan, truncate(s.Result, 8000))
+			s.Index, stepHistoryPlan(s), truncate(s.Result, 8000))
 	}
 	if len(history) > maxFinalAnswerHistoryChars {
 		history = history[:maxFinalAnswerHistoryChars] + "\n...[history truncated for size]...\n"
@@ -648,7 +978,7 @@ Do NOT invent local files or directories.`, task.Description)
 	if strings.TrimSpace(system) == "" {
 		system = defaultSystemPrompt
 	}
-	system = system + "\n\n" + hostPlatformInstructions(runtime.GOOS)
+	system = system + "\n\n" + hostPlatformInstructions(runtime.GOOS) + "\n\n" + currentTimeContext(time.Now())
 	messages := []LlamaMessage{
 		{Role: "system", Content: system},
 		{Role: "user", Content: prompt},
@@ -656,10 +986,12 @@ Do NOT invent local files or directories.`, task.Description)
 
 	var fullResponse string
 	var lastResp LlamaChatResponse
+	nativeToolCalls := false
 	ctx2, cancel := context.WithTimeout(ctx, Timeout*time.Second)
 	defer cancel()
-	err := m.Client.Chat(ctx2, messages, 0.0, func(resp LlamaChatResponse) error {
+	err := m.Client.ChatTools(ctx2, m.ModelName(), messages, nil, func(resp LlamaChatResponse) error {
 		fullResponse += resp.Message.Content
+		nativeToolCalls = nativeToolCalls || resp.NativeToolCalls
 		lastResp = resp
 		return nil
 	})
@@ -668,11 +1000,7 @@ Do NOT invent local files or directories.`, task.Description)
 			return "", err
 		}
 	}
-	answer := strings.TrimSpace(fullResponse)
-	if strings.HasPrefix(answer, "{") {
-		return "The model returned structured data instead of a final answer. Raw output:\n" + answer, nil
-	}
-	return answer, nil
+	return finalAnswer(fullResponse, nativeToolCalls)
 }
 
 var _ engine.ChatModel = (*LlamaCppModel)(nil)

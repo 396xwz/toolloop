@@ -32,12 +32,6 @@ func (m *OllamaModel) SystemPromptValue() string { return m.SystemPrompt }
 
 func (m *OllamaModel) SetSystemPrompt(prompt string) { m.SystemPrompt = prompt }
 
-type ModelResponse struct {
-	Plan     string                 `json:"plan"`
-	ToolName string                 `json:"tool_name"`
-	Args     map[string]interface{} `json:"args"`
-}
-
 func resolveToolFromResponse(msg api.Message) (name string, args map[string]string, ok bool) {
 	if len(msg.ToolCalls) > 0 {
 		tc := msg.ToolCalls[0]
@@ -58,54 +52,7 @@ func resolveToolFromResponse(msg api.Message) (name string, args map[string]stri
 		}
 	}
 
-	content := strings.TrimSpace(msg.Content)
-	if content != "" {
-		if tn, fa, err := parseToolJSON(content); err == nil {
-			if tn == "fs" {
-				fa = normalizeFSArgs(fa)
-			}
-			if tn == "shell" {
-				if _, has := fa["cmd"]; !has {
-					if c := fa["command"]; c != "" {
-						fa["cmd"] = c
-					}
-				}
-			}
-			if !argsLookCorrupt(fa) && hasMinimumArgs(tn, fa) {
-				return tn, fa, true
-			}
-		}
-
-		if strings.HasPrefix(content, "{") {
-			cleaned := cleanJSON(content)
-			var parsed ModelResponse
-			if err := json.Unmarshal([]byte(cleaned), &parsed); err == nil {
-				if parsed.ToolName != "" && parsed.ToolName != "none" {
-					a := normalizeArgs(parsed.Args)
-					if parsed.ToolName == "fs" {
-						a = normalizeFSArgs(a)
-					}
-					if !argsLookCorrupt(a) && hasMinimumArgs(parsed.ToolName, a) {
-						return parsed.ToolName, a, true
-					}
-				}
-			}
-		}
-	}
-
-	// Last resort: native after normalize only
-	if len(msg.ToolCalls) > 0 {
-		tc := msg.ToolCalls[0]
-		name = strings.TrimSpace(tc.Function.Name)
-		args = toolCallArgsToMap(tc.Function.Arguments)
-		if name == "fs" {
-			args = normalizeFSArgs(args)
-		}
-		if name != "" && !argsLookCorrupt(args) && hasMinimumArgs(name, args) {
-			return name, args, true
-		}
-	}
-	return "", nil, false
+	return resolveLlamaToolFromResponse(LlamaMessage{ToolCalls: extractLlamaToolCalls(msg.Content)})
 }
 
 // ─── RAG / MEMORY HELPERS ───────────────────────────────────────────
@@ -325,7 +272,7 @@ func (m *OllamaModel) PlanNextStep(ctx context.Context, task *engine.Task) (*eng
 			toolInfo = fmt.Sprintf("%s %v", s.ToolCall.Name, s.ToolCall.Args)
 		}
 		history += fmt.Sprintf("- Step %d: %s | Tool: %s | Result: %s\n",
-			s.Index, s.Plan, toolInfo, truncate(s.Result, 8000))
+			s.Index, stepHistoryPlan(s), toolInfo, truncate(s.Result, 8000))
 	}
 	if history == "" {
 		history = "(no previous steps)"
@@ -349,7 +296,7 @@ func (m *OllamaModel) PlanNextStep(ctx context.Context, task *engine.Task) (*eng
 	if strings.TrimSpace(system) == "" {
 		system = defaultSystemPrompt
 	}
-	system = system + "\n\n" + toolInstructionsFor(task.Tools) + "\n\n" + hostPlatformInstructions(runtime.GOOS)
+	system = system + "\n\n" + toolInstructionsFor(task.Tools) + "\n\n" + hostPlatformInstructions(runtime.GOOS) + "\n\n" + currentTimeContext(time.Now())
 
 	user := fmt.Sprintf(`Task:
 %s
@@ -373,6 +320,8 @@ Call a tool if needed. Otherwise respond with a short note that no tool is requi
 			// include tool result as assistant message
 			res := truncate(s.Result, 8000)
 			messages = append(messages, api.Message{Role: "assistant", Content: fmt.Sprintf("Tool %s returned: %s", s.ToolCall.Name, res)})
+		} else if strings.HasPrefix(s.Plan, "Blocked:") {
+			messages = append(messages, api.Message{Role: "assistant", Content: s.Plan})
 		}
 	}
 	messages = append(messages, api.Message{Role: "user", Content: user})
@@ -430,13 +379,13 @@ Call a tool if needed. Otherwise respond with a short note that no tool is requi
 
 	step := &engine.Step{
 		Index: len(task.Steps),
-		Plan:  strings.TrimSpace(last.Message.Content),
+		Plan:  stripReasoning(last.Message.Content),
 	}
 
 	name, args, ok := resolveToolFromResponse(last.Message)
 	if !ok {
-		if step.Plan == "" {
-			step.Plan = "No more tools needed"
+		if problem := responseProblem(step.Plan); problem != "" || len(last.Message.ToolCalls) > 0 {
+			step.Plan = "Blocked: invalid model response; return a valid tool call or a plain-text completion note"
 		}
 		return step, nil
 	}
@@ -447,25 +396,25 @@ Call a tool if needed. Otherwise respond with a short note that no tool is requi
 		path := sanitizePath(args["path"])
 		args["path"] = path
 
-		if op != "" && !taskAllowsFSOp(task.Description, op) {
-			d := strings.ToLower(task.Description)
-			if !(strings.Contains(d, "read") || strings.Contains(d, "open") ||
-				strings.Contains(d, "file") || strings.Contains(d, "list") ||
-				strings.Contains(d, "tree") || strings.Contains(d, "write")) {
-				step.Plan = "Blocked: fs op not allowed by task text"
+		if !isWorkspaceFSRead(op, path) {
+			if op != "" && !taskAllowsFSOp(task.Description, op) {
+				d := strings.ToLower(task.Description)
+				if !(strings.Contains(d, "read") || strings.Contains(d, "open") ||
+					strings.Contains(d, "file") || strings.Contains(d, "list") ||
+					strings.Contains(d, "tree") || strings.Contains(d, "write")) {
+					step.Plan = "Blocked: fs op not allowed by task text"
+					return step, nil
+				}
+			}
+			if path != "" && !isAllowedFSPath(task.Description, path) {
+				step.Plan = "Blocked: path not mentioned in task"
 				return step, nil
 			}
-		}
-		if path != "" && !isAllowedFSPath(task.Description, path) {
-			step.Plan = "Blocked: path not mentioned in task"
-			return step, nil
 		}
 	}
 
 	step.ToolCall = &engine.ToolCall{Name: name, Args: args}
-	if step.Plan == "" || strings.HasPrefix(strings.TrimSpace(step.Plan), "{") {
-		step.Plan = fmt.Sprintf("call %s %v", name, args)
-	}
+	step.Plan = fmt.Sprintf("call %s %v", name, args)
 	return step, nil
 }
 
@@ -479,7 +428,7 @@ func (m *OllamaModel) GenerateFinalAnswer(ctx context.Context, task *engine.Task
 			usedTools = true
 		}
 		history += fmt.Sprintf("Step %d:\nPlan: %s\nResult:\n%s\n\n",
-			s.Index, s.Plan, truncate(s.Result, 1200000))
+			s.Index, stepHistoryPlan(s), truncate(s.Result, 1200000))
 	}
 	if history == "" {
 		history = "(no steps were executed)"
@@ -529,7 +478,7 @@ Do NOT invent local files or directories.`, task.Description)
 	if strings.TrimSpace(system) == "" {
 		system = defaultSystemPrompt
 	}
-	system = system + "\n\n" + hostPlatformInstructions(runtime.GOOS)
+	system = system + "\n\n" + hostPlatformInstructions(runtime.GOOS) + "\n\n" + currentTimeContext(time.Now())
 	req := &api.ChatRequest{
 		Model: modelName,
 		Messages: []api.Message{
@@ -544,6 +493,7 @@ Do NOT invent local files or directories.`, task.Description)
 
 	var fullResponse string
 	var lastResp api.ChatResponse
+	hasToolCalls := false
 	debugf("DEBUG: starting GenerateFinalAnswer Chat to model %s\n", m.Model)
 	start := time.Now()
 	ctx2, cancel := context.WithTimeout(ctx, Timeout*time.Second)
@@ -551,6 +501,7 @@ Do NOT invent local files or directories.`, task.Description)
 	err := m.Client.Chat(ctx2, req, func(resp api.ChatResponse) error {
 		debugf("DEBUG: finalAnswer chunk content_len=%d toolcalls=%d\n", len(resp.Message.Content), len(resp.Message.ToolCalls))
 		fullResponse += resp.Message.Content
+		hasToolCalls = hasToolCalls || len(resp.Message.ToolCalls) > 0
 		lastResp = resp
 		return nil
 	})
@@ -561,11 +512,7 @@ Do NOT invent local files or directories.`, task.Description)
 		}
 		debugf("DEBUG: proceeding with partial final answer (len=%d)\n", len(fullResponse))
 	}
-	answer := strings.TrimSpace(fullResponse)
-	if strings.HasPrefix(answer, "{") {
-		return "The model returned structured data instead of a final answer. Raw output:\n" + answer, nil
-	}
-	return answer, nil
+	return finalAnswer(fullResponse, hasToolCalls)
 }
 
 var _ engine.ChatModel = (*OllamaModel)(nil)

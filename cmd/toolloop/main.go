@@ -39,6 +39,8 @@ Use tools when needed to complete the task.
 Prefer the exact path and operation mentioned in the task.
 For directories use fs op=list or op=tree.
 For files use fs op=read or fs op=read_many.
+Read-only inspection of existing files and directories within the current working directory is available even when the task names no paths.
+For project questions, inspect the current directory (path=".") and read relevant documentation or source before answering.
 For Python scripts or Python code, use the python tool. Example: python path=python/wnba2.py.
 The python tool can run scripts under the repo's python/ directory using the project's .venv interpreter.
 When calling fs, always set op and path as plain strings (e.g. op=read, path=README.md).
@@ -313,7 +315,7 @@ func main() {
 	var tasks stringSlice
 	flag.Var(&tasks, "task", "Task description (can be used multiple times)")
 	backend := flag.String("backend", "llama.cpp", "Model backend: llama.cpp or ollama")
-	serverURL := flag.String("server", defaultLlamaURL, "llama.cpp server base URL (uses POST /completion)")
+	serverURL := flag.String("server", defaultLlamaURL, "llama.cpp server base URL (native chat/tools, with /completion fallback)")
 	webQuery := flag.String("web", "", "Web search query")
 	browserAction := flag.String("browser", "", "Browser URL")
 	scrapeURL := flag.String("scrape", "", "Scrape URL with Scrapling into markdown/text")
